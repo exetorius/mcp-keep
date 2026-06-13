@@ -650,12 +650,17 @@ if __name__ == "__main__":
     if needs_setup and is_tty:
         run_setup_menu(first_run=is_first_run)
 
-    # Hint if no pack loaded and not first run (first run will get /relay-packs naturally)
-    if not _CFG.get("integration") and not needs_setup:
-        print(
-            f"\n  No integration pack loaded. Type /relay-packs to browse and install packs.\n",
-            flush=True,
-        )
+    # Pack prompt — offer immediately if no integration is configured
+    if is_tty and not _CFG.get("integration"):
+        print("\n  No integration pack loaded.", flush=True)
+        try:
+            ans = input("  Download one now? [Y/n]: ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            ans = "n"
+        if ans in ("", "y"):
+            cmd_packs()
+        else:
+            print("  OK — type /relay-packs anytime to install one.\n", flush=True)
 
     # Start stdin command loop
     if is_tty:
