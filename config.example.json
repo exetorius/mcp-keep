@@ -1,0 +1,10 @@
+{
+  "bearer_token":  "",
+  "proxy_port":    8089,
+  "upstream_host": "127.0.0.1",
+  "upstream_port": 8088,
+  "manifest_path": "",
+  "integration":   "",
+  "server_name":   "mcp-auth-relay",
+  "instructions":  ""
+}

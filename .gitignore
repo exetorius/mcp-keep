@@ -1,0 +1,26 @@
+# C++ build artifacts
+cpp/build/
+cpp/_deps/
+*.exe
+*.dll
+*.so
+*.dylib
+*.obj
+*.o
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# Config (contains secrets)
+config.json
+
+# Downloaded integration packs (installed via /packs — not part of core)
+integrations/
+
+# OS
+.DS_Store
+Thumbs.db
