@@ -108,6 +108,10 @@ Other commands:
 - SSE heartbeat — a persistent GET `/mcp` stream sends a comment every 15 seconds to prevent MCP clients from reconnecting in a tight loop.
 - New connection per call — avoids stale keep-alive socket errors between tool calls.
 
+## Contributing
+
+PRs are welcome. Please target the `contrib` branch — not `main`. Main is locked to the maintainers.
+
 ## Repository Layout
 
 ```
