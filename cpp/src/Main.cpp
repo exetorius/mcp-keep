@@ -1,6 +1,6 @@
 // mcp-auth-relay — C++ implementation
 // Lightweight MCP relay with bearer token injection, first-run setup,
-// OS startup registration, and /relay-* commands.
+// OS startup registration, /relay-* commands, and relay_install_pack MCP tool.
 //
 // Build: cmake -B build -S . && cmake --build build --config Release
 // Run:   ./mcp-auth-relay  (reads config.json from the same directory as the executable)
@@ -10,10 +10,12 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <mutex>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -22,9 +24,13 @@
 #  include <windows.h>
 #  include <io.h>
 #  define IS_TTY (_isatty(_fileno(stdin)))
+#  define POPEN  _popen
+#  define PCLOSE _pclose
 #else
 #  include <unistd.h>
 #  define IS_TTY (isatty(STDIN_FILENO))
+#  define POPEN  popen
+#  define PCLOSE pclose
 #endif
 
 namespace fs = std::filesystem;
@@ -124,10 +130,11 @@ static json load_manifest(const std::string& manifest_path)
 static json        g_hints;
 static json        g_synthetic_tools = json::array();
 static std::string g_instructions;
+static std::mutex  g_integration_mutex;
 
 static std::string load_integration(const fs::path& repo_root, const std::string& name, Config& cfg)
 {
-    g_hints          = json::object();
+    g_hints           = json::object();
     g_synthetic_tools = json::array();
 
     if (name.empty()) return "";
@@ -280,6 +287,226 @@ static std::pair<bool, std::string> unregister_startup()
 }
 
 // ---------------------------------------------------------------------------
+// Pack installer helpers (curl-based, works on Windows 10+, macOS, Linux)
+// ---------------------------------------------------------------------------
+
+static const std::string PACKS_REPO   = "exetorius/mcp-auth-relay-integrations";
+static const std::string PACKS_BRANCH = "main";
+
+static fs::path g_repo_root;
+
+static std::string run_command_output(const std::string& cmd)
+{
+    std::string result;
+    FILE* pipe = POPEN(cmd.c_str(), "r");
+    if (!pipe) return "";
+    char buf[512];
+    while (fgets(buf, sizeof(buf), pipe))
+        result += buf;
+    PCLOSE(pipe);
+    return result;
+}
+
+static std::string curl_get(const std::string& url)
+{
+    std::string cmd = "curl -s -L "
+                      "-H \"User-Agent: mcp-auth-relay\" "
+                      "-H \"Accept: application/vnd.github+json\" "
+                      "\"" + url + "\"";
+    return run_command_output(cmd);
+}
+
+static bool curl_download(const std::string& url, const fs::path& dest)
+{
+    fs::create_directories(dest.parent_path());
+    std::string cmd = "curl -s -L "
+                      "-H \"User-Agent: mcp-auth-relay\" "
+                      "-o \"" + dest.string() + "\" "
+                      "\"" + url + "\"";
+    return std::system(cmd.c_str()) == 0;
+}
+
+// ---------------------------------------------------------------------------
+// Post-install (non-interactive — auto-applies, returns summary string)
+// ---------------------------------------------------------------------------
+
+static std::string post_install_mcp_server_silent(const json& step)
+{
+    std::string server_name = step.value("server_name", "");
+    auto server_config      = step.value("server_config", json::object());
+    std::string target_str  = step.value("target", "~/.claude/.mcp.json");
+
+    fs::path target;
+#if defined(_WIN32)
+    const char* home = std::getenv("USERPROFILE");
+#else
+    const char* home = std::getenv("HOME");
+#endif
+    if (!target_str.empty() && target_str[0] == '~')
+        target = fs::path(home ? home : "") / target_str.substr(2);
+    else
+        target = target_str;
+
+    json existing = json::object();
+    if (fs::exists(target))
+    {
+        try { std::ifstream f(target); existing = json::parse(f); }
+        catch (...) {}
+    }
+    if (!existing.contains("servers")) existing["servers"] = json::object();
+    if (existing["servers"].contains(server_name))
+        return "'" + server_name + "' is already configured in " + target.string() + ".";
+
+    existing["servers"][server_name] = server_config;
+    try
+    {
+        fs::create_directories(target.parent_path());
+        std::ofstream f(target);
+        f << existing.dump(2);
+        return "Added '" + server_name + "' to " + target.string() +
+               ". Restart Claude Code for the change to take effect.";
+    }
+    catch (const std::exception& e)
+    {
+        std::string snippet = json({{server_name, server_config}}).dump(4);
+        return std::string("Could not write to ") + target.string() + ": " + e.what() +
+               "\n\nAdd this manually to " + target.string() + " under \"servers\":\n\n  " + snippet;
+    }
+}
+
+static std::string run_post_install_mcp(const fs::path& pack_dir)
+{
+    fs::path path = pack_dir / "post_install.json";
+    if (!fs::exists(path)) return "";
+    try
+    {
+        std::ifstream f(path);
+        auto steps = json::parse(f);
+        std::string result;
+        for (auto& step : steps)
+        {
+            if (step.value("type", "") == "mcp_server")
+            {
+                auto r = post_install_mcp_server_silent(step);
+                if (!r.empty()) result += (result.empty() ? "" : "\n") + r;
+            }
+        }
+        return result;
+    }
+    catch (...) { return "Warning: could not process post_install.json"; }
+}
+
+// ---------------------------------------------------------------------------
+// Conditional setup tools — disappear once relay is configured
+// ---------------------------------------------------------------------------
+
+static json get_setup_tools(const Config& cfg)
+{
+    json tools = json::array();
+    if (cfg.integration.empty())
+    {
+        tools.push_back({
+            {"name", "relay_install_pack"},
+            {"description",
+                "Install an integration pack for this MCP relay. "
+                "Call with no arguments to list available packs, or with name='<pack>' to install one. "
+                "Packs add tool hints, synthetic tools, and agent instructions tailored to your upstream MCP server. "
+                "This tool disappears once a pack is installed."},
+            {"inputSchema", {
+                {"type", "object"},
+                {"properties", {
+                    {"name", {{"type","string"},{"description","Pack name to install. Omit to list available packs."}}}
+                }},
+                {"required", json::array()}
+            }}
+        });
+    }
+    return tools;
+}
+
+// ---------------------------------------------------------------------------
+// relay_install_pack handler
+// ---------------------------------------------------------------------------
+
+static json make_tool_result(const json& req_id, const std::string& text, bool is_error = false)
+{
+    json result = {{"content", json::array({{{"type","text"},{"text",text}}})}};
+    if (is_error) result["isError"] = true;
+    return {{"jsonrpc","2.0"},{"id",req_id},{"result",result}};
+}
+
+static json handle_relay_install_pack(const json& req_id, const std::string& pack_name, Config& cfg)
+{
+    // No name — list available packs
+    if (pack_name.empty())
+    {
+        std::string api_url = "https://api.github.com/repos/" + PACKS_REPO + "/contents";
+        std::string raw = curl_get(api_url);
+        try
+        {
+            auto arr = json::parse(raw);
+            std::string text = "Available integration packs:\n";
+            for (auto& entry : arr)
+                if (entry.value("type","") == "dir")
+                    text += "  - " + entry.value("name","") + "\n";
+            text += "\nCall relay_install_pack with name='<pack>' to install one.";
+            return make_tool_result(req_id, text);
+        }
+        catch (...) {
+            return make_tool_result(req_id, "Could not reach GitHub to list packs. Check your internet connection.", true);
+        }
+    }
+
+    // Download pack files
+    std::string api_url = "https://api.github.com/repos/" + PACKS_REPO + "/contents/" + pack_name;
+    std::string raw = curl_get(api_url);
+
+    fs::path pack_dir = g_repo_root / "integrations" / pack_name;
+    fs::create_directories(pack_dir);
+
+    std::vector<std::string> downloaded;
+    try
+    {
+        auto files = json::parse(raw);
+        for (auto& f : files)
+        {
+            if (f.value("type","") != "file") continue;
+            std::string fname = f.value("name","");
+            std::string raw_url = "https://raw.githubusercontent.com/" + PACKS_REPO +
+                                  "/" + PACKS_BRANCH + "/" + pack_name + "/" + fname;
+            if (curl_download(raw_url, pack_dir / fname))
+                downloaded.push_back(fname);
+        }
+    }
+    catch (...) {
+        return make_tool_result(req_id, "Failed to parse pack listing for '" + pack_name + "'. Check internet connection.", true);
+    }
+
+    if (downloaded.empty())
+        return make_tool_result(req_id, "No files downloaded for pack '" + pack_name + "'.", true);
+
+    // Save config and reload integration
+    save_config_key("integration", pack_name);
+    std::string status;
+    {
+        std::lock_guard<std::mutex> lock(g_integration_mutex);
+        cfg.integration = pack_name;
+        status = load_integration(g_repo_root, pack_name, cfg);
+    }
+
+    // Run post_install steps (non-interactive)
+    std::string post_result = run_post_install_mcp(pack_dir);
+
+    std::string text = "Downloaded " + std::to_string(downloaded.size()) + " files: ";
+    for (size_t i = 0; i < downloaded.size(); ++i)
+        text += (i ? ", " : "") + downloaded[i];
+    text += "\n" + status;
+    if (!post_result.empty()) text += "\n\n" + post_result;
+
+    return make_tool_result(req_id, text);
+}
+
+// ---------------------------------------------------------------------------
 // Setup menu
 // ---------------------------------------------------------------------------
 
@@ -352,8 +579,6 @@ static void run_setup_menu()
 // Command dispatch
 // ---------------------------------------------------------------------------
 
-static fs::path g_repo_root;
-
 static void cmd_status(const Config& cfg)
 {
     std::cout << "\n  mcp-auth-relay\n"
@@ -362,21 +587,28 @@ static void cmd_status(const Config& cfg)
               << "  Upstream:     http://" << cfg.upstream_host << ":" << cfg.upstream_port << "/mcp\n"
               << "  Token:        " << (cfg.bearer_token.empty() ? "NOT SET" : "set") << "\n"
               << "  Manifest:     " << (cfg.manifest_path.empty() ? "not configured" : cfg.manifest_path) << "\n";
-    if (!cfg.manifest_path.empty())
-        std::cout << "  Tools:        " << load_manifest(cfg.manifest_path).size()
-                  << " from manifest + " << g_synthetic_tools.size() << " synthetic\n";
-    if (!cfg.integration.empty())
-        std::cout << "  Integration:  " << cfg.integration
-                  << " (" << g_hints.size() << " hints, " << g_synthetic_tools.size() << " synthetic tools)\n";
-    else
-        std::cout << "  Integration:  none — type /relay-packs to install one\n";
+    {
+        std::lock_guard<std::mutex> lock(g_integration_mutex);
+        if (!cfg.manifest_path.empty())
+            std::cout << "  Tools:        " << load_manifest(cfg.manifest_path).size()
+                      << " from manifest + " << g_synthetic_tools.size() << " synthetic\n";
+        if (!cfg.integration.empty())
+            std::cout << "  Integration:  " << cfg.integration
+                      << " (" << g_hints.size() << " hints, " << g_synthetic_tools.size() << " synthetic tools)\n";
+        else
+            std::cout << "  Integration:  none — type /relay-packs to install one, or ask the AI to run relay_install_pack\n";
+    }
     std::cout << "  Startup:      " << (cfg.startup_registered ? "enabled" : "manual") << "\n\n";
 }
 
 static void cmd_reload(Config& cfg)
 {
     cfg = load_config(g_config_path);
-    auto status = load_integration(g_repo_root, cfg.integration, cfg);
+    std::string status;
+    {
+        std::lock_guard<std::mutex> lock(g_integration_mutex);
+        status = load_integration(g_repo_root, cfg.integration, cfg);
+    }
     std::cout << "  Reloaded. " << (status.empty() ? "No integration." : status) << "\n\n";
 }
 
@@ -385,7 +617,6 @@ static void command_loop(Config& cfg)
     std::string line;
     while (std::getline(std::cin, line))
     {
-        // trim
         while (!line.empty() && (line.back() == '\r' || line.back() == '\n' || line.back() == ' '))
             line.pop_back();
 
@@ -401,8 +632,8 @@ static void command_loop(Config& cfg)
         else if (line == "/relay-reload") { cmd_reload(cfg); }
         else if (line == "/relay-packs")
         {
-            std::cout << "  /relay-packs: use 'python proxy.py' for interactive pack installation,\n"
-                      << "  or manually clone a pack into the integrations/ folder.\n\n";
+            std::cout << "  /relay-packs: ask the AI to run relay_install_pack,\n"
+                      << "  or use 'python proxy.py' for interactive pack installation.\n\n";
         }
         else
         {
@@ -476,9 +707,12 @@ int main(int argc, char* argv[])
 
     Config cfg = load_config(g_config_path);
     g_cfg_ptr  = &cfg;
-    auto intg_status = load_integration(g_repo_root, cfg.integration, cfg);
+    std::string intg_status;
+    {
+        std::lock_guard<std::mutex> lock(g_integration_mutex);
+        intg_status = load_integration(g_repo_root, cfg.integration, cfg);
+    }
 
-    // Startup log
     if (cfg.bearer_token.empty())
         std::cout << "[relay] WARNING: bearer_token is empty — upstream requests will be unauthenticated.\n";
     else
@@ -498,18 +732,16 @@ int main(int argc, char* argv[])
     std::cout << "[relay] mcp-auth-relay started — listening on http://127.0.0.1:" << cfg.proxy_port << "/mcp\n";
     std::cout << "[relay] Forwarding to upstream at http://" << cfg.upstream_host << ":" << cfg.upstream_port << "/mcp\n";
 
-    // First-run / startup setup (only in interactive terminal)
+    if (cfg.integration.empty())
+        std::cout << "[relay] No integration pack — AI can run relay_install_pack to install one.\n";
+
     bool needs_setup = first_run || !cfg.startup_asked;
     if (needs_setup && IS_TTY)
         run_setup_menu();
-    else if (cfg.integration.empty())
-        std::cout << "\n  No integration pack loaded. Type /relay-packs for options.\n\n";
 
-    // Start stdin command loop in background thread (TTY only)
     if (IS_TTY)
         std::thread([&cfg]() { command_loop(cfg); }).detach();
 
-    // HTTP server
     httplib::Server svr;
 
     svr.Options("/mcp", [](const httplib::Request&, httplib::Response& res) {
@@ -554,10 +786,14 @@ int main(int argc, char* argv[])
         {
             auto client_version = rpc.value("params/protocolVersion"_json_pointer, std::string("2024-11-05"));
             std::cout << "[relay] initialize (protocol " << client_version << ")\n";
-            const std::string& instr = cfg.instructions.empty()
-                ? std::string("MCP relay active. Upstream: http://") + cfg.upstream_host + ":"
-                  + std::to_string(cfg.upstream_port) + "/mcp."
-                : cfg.instructions;
+            std::string instr;
+            {
+                std::lock_guard<std::mutex> lock(g_integration_mutex);
+                instr = cfg.instructions.empty()
+                    ? std::string("MCP relay active. Upstream: http://") + cfg.upstream_host + ":"
+                      + std::to_string(cfg.upstream_port) + "/mcp."
+                    : cfg.instructions;
+            }
             res.set_content(json({{"jsonrpc","2.0"},{"id",req_id},{"result",{
                 {"protocolVersion", client_version},
                 {"capabilities", {{"tools", json::object()}}},
@@ -570,13 +806,31 @@ int main(int argc, char* argv[])
 
         if (method == "tools/list")
         {
-            auto tools = apply_hints(load_manifest(cfg.manifest_path));
-            for (auto& t : g_synthetic_tools) tools.push_back(t);
+            json tools;
+            {
+                std::lock_guard<std::mutex> lock(g_integration_mutex);
+                tools = apply_hints(load_manifest(cfg.manifest_path));
+                for (auto& t : g_synthetic_tools) tools.push_back(t);
+            }
+            for (auto& t : get_setup_tools(cfg)) tools.push_back(t);
             std::cout << "[relay] tools/list -> " << tools.size() << " tools\n";
             res.set_content(
                 json({{"jsonrpc","2.0"},{"id",req_id},{"result",{{"tools",tools}}}}).dump(),
                 "application/json");
             return;
+        }
+
+        if (method == "tools/call")
+        {
+            auto tool_name = rpc.value("/params/name"_json_pointer, std::string(""));
+            if (tool_name == "relay_install_pack")
+            {
+                auto args      = rpc.value("/params/arguments"_json_pointer, json::object());
+                auto pack_name = args.value("name", std::string(""));
+                std::cout << "[relay] relay_install_pack('" << pack_name << "') -> handled by relay\n";
+                res.set_content(handle_relay_install_pack(req_id, pack_name, cfg).dump(), "application/json");
+                return;
+            }
         }
 
         auto [success, body] = forward_to_upstream(req.body, cfg);

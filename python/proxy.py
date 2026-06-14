@@ -557,6 +557,109 @@ def upstream_error_response(req_id, tool_name: str, msg: str = "") -> dict:
             "result": {"content": [{"type": "text", "text": text}], "isError": True}}
 
 # ---------------------------------------------------------------------------
+# Conditional setup tools — shown only when relay is not yet configured
+# ---------------------------------------------------------------------------
+
+def _get_setup_tools() -> list[dict]:
+    """Return relay-level setup tools based on current config state.
+    Removed from tools/list once the relevant config is in place."""
+    tools = []
+    if not _CFG.get("integration"):
+        tools.append({
+            "name": "relay_install_pack",
+            "description": (
+                "Install an integration pack for this MCP relay. "
+                "Call with no arguments to list available packs, or with name='<pack>' to install one. "
+                "Packs add tool hints, synthetic tools, and agent instructions tailored to your upstream MCP server. "
+                "This tool disappears once a pack is installed."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "Pack name to install. Omit to list available packs."}
+                },
+                "required": []
+            }
+        })
+    return tools
+
+
+def handle_relay_install_pack(req_id, pack_name: str) -> dict:
+    def ok(text):
+        return {"jsonrpc": "2.0", "id": req_id,
+                "result": {"content": [{"type": "text", "text": text}]}}
+    def err(text):
+        return {"jsonrpc": "2.0", "id": req_id,
+                "result": {"content": [{"type": "text", "text": text}], "isError": True}}
+
+    if not pack_name:
+        try:
+            packs = _list_available_packs()
+            text = "Available integration packs:\n" + "\n".join(f"  - {p}" for p in packs)
+            text += "\n\nCall relay_install_pack with name='<pack>' to install one."
+            return ok(text)
+        except Exception as e:
+            return err(f"Could not reach GitHub: {e}")
+
+    success, msg = _download_pack(pack_name)
+    if not success:
+        return err(f"Download failed: {msg}")
+
+    _save_config({"integration": pack_name})
+    status = _load_integration(pack_name)
+
+    post_result = _run_post_install_mcp(_INTEGRATIONS_DIR / pack_name)
+    text = f"{msg}\n{status}"
+    if post_result:
+        text += f"\n\n{post_result}"
+    return ok(text)
+
+
+def _run_post_install_mcp(pack_path: pathlib.Path) -> str:
+    """Process post_install.json non-interactively (MCP tool context, no prompts)."""
+    path = pack_path / "post_install.json"
+    if not path.exists():
+        return ""
+    try:
+        with open(path) as f:
+            steps = json.load(f)
+    except Exception as e:
+        return f"Warning: could not read post_install.json: {e}"
+    results = []
+    for step in steps:
+        if step.get("type") == "mcp_server":
+            results.append(_post_install_mcp_server_silent(step))
+    return "\n".join(r for r in results if r)
+
+
+def _post_install_mcp_server_silent(step: dict) -> str:
+    server_name   = step["server_name"]
+    server_config = step["server_config"]
+    target = pathlib.Path(step.get("target", "~/.claude/.mcp.json")).expanduser()
+    try:
+        existing: dict = {}
+        if target.exists():
+            with open(target) as f:
+                existing = json.load(f)
+        if "servers" not in existing:
+            existing["servers"] = {}
+        if server_name in existing["servers"]:
+            return f"'{server_name}' is already configured in {target}."
+        existing["servers"][server_name] = server_config
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with open(target, "w") as f:
+            json.dump(existing, f, indent=2)
+        return f"Added '{server_name}' to {target}. Restart Claude Code for the change to take effect."
+    except Exception as e:
+        snippet = json.dumps({server_name: server_config}, indent=4)
+        return (
+            f"Could not write to {target}: {e}\n"
+            f"Add this manually to {target} under \"servers\":\n\n"
+            + "\n".join(f"  {line}" for line in snippet.splitlines())
+        )
+
+
+# ---------------------------------------------------------------------------
 # HTTP handler
 # ---------------------------------------------------------------------------
 
@@ -627,9 +730,18 @@ class RelayHandler(BaseHTTPRequestHandler):
             self.send_response(202); self.end_headers(); return
 
         if method == "tools/list":
-            tools = list(apply_hints(load_manifest())) + _SYNTHETIC_TOOLS
+            tools = list(apply_hints(load_manifest())) + _SYNTHETIC_TOOLS + _get_setup_tools()
             log(f"tools/list -> {len(tools)} tools")
             self._ok(req_id, {"tools": tools}); return
+
+        if method == "tools/call":
+            tool_name = (rpc.get("params") or {}).get("name", "")
+            if tool_name == "relay_install_pack":
+                args = (rpc.get("params") or {}).get("arguments", {})
+                pack_name = args.get("name", "")
+                log(f"relay_install_pack('{pack_name}') -> handled by relay")
+                self._raw(handle_relay_install_pack(req_id, pack_name))
+                return
 
         success, resp_bytes = forward_to_upstream(raw_body, lhdrs)
         if success:
