@@ -92,21 +92,26 @@ def main() -> int:
             return json.loads(r.read())
 
     # Readiness poll — wait for the relay to actually serve before asserting,
-    # instead of a fixed sleep (slow runners would otherwise race startup).
-    deadline = time.time() + 30
+    # instead of a fixed sleep. Generous window because CI runners (notably
+    # macOS / Apple Silicon) can be slow to even start the process.
+    started = time.time()
+    deadline = started + 90
+    ready = False
     while time.time() < deadline:
         try:
             with opener.open(f"{base}/mcp", timeout=3) as r:
                 if r.status == 200:
+                    ready = True
                     break
         except Exception:
             time.sleep(0.5)
-    else:
+    if not ready:
         log_file.flush()
-        print("relay did not become ready within 30s", flush=True)
+        print("relay did not become ready within 90s", flush=True)
         print(log_path.read_text(encoding="utf-8", errors="replace"), flush=True)
         relay.terminate()
         return 1
+    print(f"(relay ready after {time.time() - started:.1f}s)", flush=True)
 
     def tool_names():
         return [t["name"] for t in rpc("tools/list")["result"]["tools"]]
