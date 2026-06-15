@@ -1,0 +1,30 @@
+name: CI
+
+on:
+  push:
+    branches: [main, contrib]
+  pull_request:
+    branches: [main, contrib]
+
+jobs:
+  test:
+    name: integration (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Compile check
+        run: python -m py_compile python/proxy.py
+
+      - name: Integration test
+        run: python tests/integration_test.py
