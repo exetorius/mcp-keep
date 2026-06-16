@@ -1,0 +1,79 @@
+name: Release
+
+# Build standalone, dependency-free mcp-keep binaries for Windows / macOS / Linux.
+# - Push a tag like v1.0.0  → builds, smoke-tests, and attaches binaries to a GitHub Release.
+# - Manual run (workflow_dispatch) → builds + smoke-tests only (artifacts on the run, no Release).
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write          # needed to create the Release and upload assets
+
+jobs:
+  build:
+    name: build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            asset: mcp-keep-linux-x86_64
+            ext: ""
+          - os: macos-latest
+            asset: mcp-keep-macos-arm64
+            ext: ""
+          - os: windows-latest
+            asset: mcp-keep-windows-x86_64.exe
+            ext: ".exe"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install PyInstaller
+        run: python -m pip install --upgrade pip pyinstaller
+
+      - name: Build one-file binary
+        run: pyinstaller --onefile --name mcp-keep --console python/proxy.py
+
+      - name: Smoke test the built binary
+        run: python tests/smoke_binary.py "dist/mcp-keep${{ matrix.ext }}"
+
+      - name: Stage named artifact
+        shell: bash
+        run: |
+          mkdir -p staged
+          cp "dist/mcp-keep${{ matrix.ext }}" "staged/${{ matrix.asset }}"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: staged/${{ matrix.asset }}
+          if-no-files-found: error
+
+  release:
+    name: Publish GitHub Release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Create / update Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*
+          generate_release_notes: true
+          fail_on_unmatched_files: true

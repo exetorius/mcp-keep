@@ -854,8 +854,20 @@ class QuietServer(ThreadingHTTPServer):
 
 _OS = platform.system()
 
+def _launch_args() -> list[str]:
+    """Argv that re-launches keep at login.
+
+    When packaged by PyInstaller, the binary *is* the program: sys.executable
+    points at the frozen exe and there is no script path to pass (sys.argv[0]
+    inside _MEIPASS would be wrong). When running from source, launch the
+    interpreter against proxy.py.
+    """
+    if getattr(sys, "frozen", False):
+        return [sys.executable]
+    return [sys.executable, str(pathlib.Path(__file__).resolve())]
+
 def _launch_command() -> str:
-    return f'"{sys.executable}" "{pathlib.Path(__file__).resolve()}"'
+    return " ".join(f'"{a}"' for a in _launch_args())
 
 def register_startup() -> tuple[bool, str]:
     if _OS == "Windows":
@@ -874,8 +886,7 @@ def register_startup() -> tuple[bool, str]:
 <plist version="1.0"><dict>
     <key>Label</key><string>com.mcp-keep</string>
     <key>ProgramArguments</key><array>
-        <string>{sys.executable}</string>
-        <string>{pathlib.Path(__file__).resolve()}</string>
+{chr(10).join(f"        <string>{a}</string>" for a in _launch_args())}
     </array>
     <key>RunAtLoad</key><true/>
     <key>KeepAlive</key><true/>
@@ -891,7 +902,7 @@ Description=mcp-keep
 After=network.target
 
 [Service]
-ExecStart={sys.executable} {pathlib.Path(__file__).resolve()}
+ExecStart={" ".join(_launch_args())}
 Restart=on-failure
 
 [Install]
