@@ -1,10 +1,43 @@
 # mcp-keep
 
-A lifecycle layer for MCP. `mcp-keep` fronts one or more upstream MCP servers on a single local port and **keeps their tools surfaced to your client even while an upstream is offline** — then silently re-attaches when it comes back.
+[![CI](https://github.com/exetorius/mcp-keep/actions/workflows/ci.yml/badge.svg)](https://github.com/exetorius/mcp-keep/actions/workflows/ci.yml)
+[![Latest release](https://img.shields.io/github/v/release/exetorius/mcp-keep?sort=semver)](https://github.com/exetorius/mcp-keep/releases/latest)
+![Platforms](https://img.shields.io/badge/platforms-Windows%20%7C%20macOS%20%7C%20Linux-blue)
+![Python](https://img.shields.io/badge/python-3.10%2B-blue)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+
+> A lifecycle/resilience layer for MCP — **keeps your tools surfaced to your client even while the backend is offline**, then silently re-attaches when it returns.
 
 ```
 MCP client (Claude Code) → mcp-keep :8089 → upstream MCP server(s)
 ```
+
+<table>
+<tr>
+<th>🚀 I just want to use it</th>
+<th>🛠️ I want to contribute / develop</th>
+</tr>
+<tr>
+<td valign="top">
+
+A standalone binary — **no Python, no dependencies.**
+
+**[⬇ Download the latest release](https://github.com/exetorius/mcp-keep/releases/latest)**
+
+Then jump to [Run the binary](#run-the-binary).
+
+</td>
+<td valign="top">
+
+Run from source, the test suite, and the branch/PR flow.
+
+**[📖 CONTRIBUTING.md](CONTRIBUTING.md)**
+
+Source lives in [`python/proxy.py`](python/proxy.py) (single file, stdlib only).
+
+</td>
+</tr>
+</table>
 
 ## Why
 
@@ -19,19 +52,31 @@ Aggregating several MCP servers behind one port is table stakes; `mcp-keep` does
 
 Bearer-token auth is supported as an optional passenger — injected per-upstream when a backend needs it — but it is not the headline. This is a resilience layer, not an auth proxy.
 
-## Quick start
+## Run the binary
 
-Python 3.10+, standard library only — no dependencies:
+Grab the build for your OS from the [latest release](https://github.com/exetorius/mcp-keep/releases/latest):
+
+| OS | Download |
+|----|----------|
+| Windows | [`mcp-keep-windows-x86_64.exe`](https://github.com/exetorius/mcp-keep/releases/latest/download/mcp-keep-windows-x86_64.exe) |
+| macOS (Apple Silicon) | [`mcp-keep-macos-arm64`](https://github.com/exetorius/mcp-keep/releases/latest/download/mcp-keep-macos-arm64) |
+| Linux (x86-64) | [`mcp-keep-linux-x86_64`](https://github.com/exetorius/mcp-keep/releases/latest/download/mcp-keep-linux-x86_64) |
+
+On macOS/Linux, mark it executable first (`chmod +x mcp-keep-*`), then run it. On Windows, just run the `.exe`.
+
+`mcp-keep` is **AI-driven — it does nothing on its own**; an MCP client connects and drives it. The fastest path: run the binary, then tell your assistant *"read FIRST_TIME_SETUP.md and set up keep for me"* (that file ships alongside the binary). It will wire up the client pointer and walk you through attaching your first upstream.
+
+> First run creates the home dir at `~/.mcp-keep/` and offers to start `mcp-keep` with your OS. Point your MCP client at `http://127.0.0.1:8089/mcp` (see [Claude Code setup](#claude-code-setup)).
+
+## From source
+
+Python 3.10+, standard library only — no dependencies. See [CONTRIBUTING.md](CONTRIBUTING.md) for the full dev setup.
 
 ```bash
 git clone https://github.com/exetorius/mcp-keep
 cd mcp-keep/python
 python proxy.py
 ```
-
-On first run `mcp-keep` creates its home at `~/.mcp-keep/` and asks whether to start with your OS. To configure an upstream, either talk to it through your MCP client (the `keep_install_pack` tool) or edit `~/.mcp-keep/config.json` directly (see below).
-
-Point your MCP client at `http://127.0.0.1:8089/mcp`.
 
 ## Where things live
 
@@ -125,12 +170,20 @@ Install one through your MCP client by calling the `keep_install_pack` tool (it 
 
 ## Contributing
 
-PRs welcome — please target the `contrib` branch, not `main`. Pack contributions go to [mcp-keep-integrations](https://github.com/exetorius/mcp-keep-integrations).
+PRs welcome — please target the `contrib` branch, not `main`. See **[CONTRIBUTING.md](CONTRIBUTING.md)** for the dev setup, test suite, and branch/PR flow. Pack contributions go to [mcp-keep-integrations](https://github.com/exetorius/mcp-keep-integrations).
 
 ## Repository layout
 
 ```
 python/proxy.py       — the relay (single file, stdlib only)
 config.example.json   — config template, safe to commit
-CLAUDE.md             — setup-assistant guide for Claude Code
+tests/                — integration test + binary smoke test
+.github/workflows/    — CI (tests) and release (packaged binaries)
+CLAUDE.md             — setup-assistant guide for Claude Code (clone path)
+FIRST_TIME_SETUP.md   — AI bootstrap guide shipped with the binary
+CONTRIBUTING.md       — dev setup, tests, branch/PR flow
 ```
+
+## License
+
+[MIT](LICENSE) © exetorius

@@ -1,0 +1,74 @@
+# Contributing to mcp-keep
+
+Thanks for helping out. `mcp-keep` is a small, single-file relay with a security-first design — contributions are very welcome, and the bar is "keep it simple, keep it safe."
+
+## Project shape
+
+```
+python/proxy.py        — the relay (single file, stdlib only — no dependencies)
+config.example.json    — config template, safe to commit
+tests/integration_test.py — end-to-end test (onboarding + the moat) against a fake upstream
+tests/smoke_binary.py  — boots a PyInstaller-built binary and asserts it serves
+.github/workflows/     — ci.yml (tests) + release.yml (packaged binaries)
+CLAUDE.md              — setup-assistant guide for Claude Code (clone path)
+FIRST_TIME_SETUP.md    — AI bootstrap guide that ships with the binary
+```
+
+Everything the relay does at runtime lives under a single global home, `~/.mcp-keep/` (override with the `MCP_KEEP_HOME` environment variable). Nothing is written into the repo or a project.
+
+## Run from source
+
+Python 3.10+ — **standard library only, no dependencies.**
+
+```bash
+git clone https://github.com/exetorius/mcp-keep
+cd mcp-keep/python
+python proxy.py
+```
+
+Use an isolated home while developing so you never touch a real config:
+
+```bash
+MCP_KEEP_HOME=/tmp/keep-dev python proxy.py
+```
+
+## Tests
+
+Both tests are stdlib-only and headless — no network, no fixtures to install.
+
+```bash
+# End-to-end: onboarding tools + the moat (cache-when-down, re-attach, routing)
+python tests/integration_test.py
+
+# Optional: build a binary and smoke-test the frozen artifact
+pip install pyinstaller
+pyinstaller --onefile --name mcp-keep --console python/proxy.py
+python tests/smoke_binary.py "dist/mcp-keep"        # dist/mcp-keep.exe on Windows
+```
+
+CI runs `py_compile` + `integration_test.py` on Windows, macOS, and Linux for every push/PR to `main` and `contrib`. The release workflow additionally builds and smoke-tests the binaries.
+
+## Branch & PR flow
+
+**Do not push to `main` directly.** The flow is:
+
+1. Branch from `main` (e.g. `feat/…`, `fix/…`, `ci/…`, `docs/…`).
+2. Open a PR into **`contrib`**.
+3. CI runs across all three OSes; merge once green.
+4. `contrib` is promoted to `main` via its own PR once changes are validated together.
+
+Pack contributions don't go here at all — they live in the separate [mcp-keep-integrations](https://github.com/exetorius/mcp-keep-integrations) repo, fetched on demand by the relay.
+
+## Design guardrails
+
+These are deliberate; please keep them in mind (and raise an issue first if you want to challenge one):
+
+- **No server-specific logic in `proxy.py`.** Anything tailored to a particular upstream belongs in an integration pack, not the core relay.
+- **Loopback only.** `mcp-keep` binds to `127.0.0.1` and is not loosenable to a bare hostname/LAN bind without a real opt-in flow ([issue #4](https://github.com/exetorius/mcp-keep/issues/4)). No SSL/TLS — it's localhost by design.
+- **Security gates stay always-on.** Loopback `Host` check, `Origin` allowlist, and body-size cap are zero-config and not removable. They defend against DNS-rebinding.
+- **No silent privileged effects.** Anything that writes config, adds an upstream, or touches the network surface must be explicit and visible to the user.
+- **Stdlib only.** The relay has no third-party runtime dependencies — please keep it that way so the binary stays a single self-contained file.
+
+## Filing issues
+
+Spotted an improvement or a sharp edge in passing? File an issue — we'd rather track it than lose it. The repo uses `security`, `reliability`, and `design` labels.
