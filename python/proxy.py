@@ -53,6 +53,11 @@ PACKS_BRANCH = "main"
 SERVER_NAME = "mcp-keep"
 VERSION     = "1.0.0"
 
+# MCP protocol revision (the spec versions revisions by date, not semver).
+# Pinned to the oldest stable revision for maximum upstream interop; the only
+# methods we use (initialize, tools/list) are unchanged across revisions.
+MCP_PROTOCOL_VERSION = "2024-11-05"
+
 # ---------------------------------------------------------------------------
 # Logging
 # ---------------------------------------------------------------------------
@@ -295,17 +300,35 @@ def _post_mcp(url: str, payload: dict, bearer: str, session_id: str = ""):
         return e.code, {}, None
 
 def _parse_mcp_body(raw: bytes, content_type: str):
-    """Handle both plain JSON and SSE (text/event-stream) responses."""
+    """Handle both plain JSON and SSE (text/event-stream) responses.
+
+    SSE events may carry their payload across multiple `data:` lines (a server
+    is free to pretty-print JSON one physical line per `data:` field). Per the
+    SSE spec those lines are concatenated with newlines to form the event data,
+    so we must accumulate them and parse the joined payload — not each line
+    individually. We return the first event that parses as JSON. (See issue #23.)
+    """
     text = raw.decode("utf-8", errors="replace").strip()
     if "text/event-stream" in content_type:
+        data_lines: list[str] = []
         for line in text.splitlines():
-            line = line.strip()
             if line.startswith("data:"):
-                chunk = line[5:].strip()
-                try:
-                    return json.loads(chunk)
-                except json.JSONDecodeError:
-                    continue
+                # Strip exactly one leading space after the colon (SSE spec).
+                value = line[5:]
+                if value.startswith(" "):
+                    value = value[1:]
+                data_lines.append(value)
+            elif not line.strip():            # blank line terminates an event
+                if data_lines:
+                    try:
+                        return json.loads("\n".join(data_lines))
+                    except json.JSONDecodeError:
+                        data_lines = []
+        if data_lines:                        # last event, no trailing blank line
+            try:
+                return json.loads("\n".join(data_lines))
+            except json.JSONDecodeError:
+                return None
         return None
     try:
         return json.loads(text)
@@ -322,7 +345,7 @@ def capture_upstream(u: dict) -> bool:
     init_payload = {
         "jsonrpc": "2.0", "id": 1, "method": "initialize",
         "params": {
-            "protocolVersion": "2024-11-05",
+            "protocolVersion": MCP_PROTOCOL_VERSION,
             "capabilities": {},
             "clientInfo": {"name": "mcp-keep", "version": VERSION},
         },
@@ -418,17 +441,17 @@ def forward_call(u: dict, body_bytes: bytes, client_headers: dict) -> tuple[bool
         try:
             req = urllib.request.Request(url, data=body_bytes, headers=fwd, method="POST")
             with urllib.request.urlopen(req, timeout=120) as resp:
-                return True, resp.read()
+                return True, resp.headers.get("Content-Type", ""), resp.read()
         except urllib.error.HTTPError as e:
             body = e.read()
             log(f"upstream '{u['name']}' HTTP {e.code}: {body[:200]}")
-            return False, body
+            return False, e.headers.get("Content-Type", ""), body
         except (urllib.error.URLError, socket.timeout, OSError) as exc:
             last = exc
             if attempt == 0:
                 log(f"'{u['name']}' connection error, retrying: {exc}")
     log(f"'{u['name']}' unreachable: {last}")
-    return False, b""
+    return False, "", b""
 
 def error_result(req_id, text: str) -> dict:
     return {"jsonrpc": "2.0", "id": req_id,
@@ -752,7 +775,7 @@ class KeepHandler(BaseHTTPRequestHandler):
         req_id = rpc.get("id")
 
         if method == "initialize":
-            ver = (rpc.get("params") or {}).get("protocolVersion", "2024-11-05")
+            ver = (rpc.get("params") or {}).get("protocolVersion", MCP_PROTOCOL_VERSION)
             instr = STATE.aggregate_instructions() or (
                 "mcp-keep active. Tools stay surfaced even while an upstream is offline.")
             self._result(req_id, {
@@ -785,9 +808,9 @@ class KeepHandler(BaseHTTPRequestHandler):
                 self._raw(error_result(req_id,
                     f"No upstream knows the tool '{tool_name}'."))
                 return
-            success, resp = forward_call(u, raw, client_headers)
+            success, ctype, resp = forward_call(u, raw, client_headers)
             if success:
-                self._passthrough(resp)
+                self._forward_response(resp, ctype)
                 log(f"tools/call '{tool_name}' -> '{u['name']}'")
             else:
                 msg = resp.decode(errors="replace").strip() if resp else ""
@@ -800,9 +823,9 @@ class KeepHandler(BaseHTTPRequestHandler):
 
         # any other method: best-effort forward to the single upstream, else empty
         if len(STATE.cfg["upstreams"]) == 1:
-            success, resp = forward_call(STATE.cfg["upstreams"][0], raw, client_headers)
+            success, ctype, resp = forward_call(STATE.cfg["upstreams"][0], raw, client_headers)
             if success:
-                self._passthrough(resp); return
+                self._forward_response(resp, ctype); return
         self._result(req_id, {})
 
     # -- response helpers -----------------------------------------------
@@ -817,9 +840,17 @@ class KeepHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def _passthrough(self, body: bytes):
+    def _forward_response(self, body: bytes, content_type: str):
+        """Relay an upstream response to the client. Upstreams may answer in SSE
+        (text/event-stream) — re-emit as clean JSON so the client always gets a
+        consistent content-type (see issue #26). If the body can't be parsed,
+        pass it through faithfully under its real content-type."""
+        obj = _parse_mcp_body(body, content_type)
+        if obj is not None:
+            self._raw(obj)
+            return
         self.send_response(200)
-        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Type", content_type or "application/json")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)

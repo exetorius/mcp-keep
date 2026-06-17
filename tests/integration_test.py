@@ -48,12 +48,26 @@ class _Upstream(http.server.BaseHTTPRequestHandler):
             result = {"content": [{"type": "text", "text": "ECHO OK from upstream"}]}
         else:
             result = {}
-        body = json.dumps({"jsonrpc": "2.0", "id": rid, "result": result}).encode()
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
+        payload = {"jsonrpc": "2.0", "id": rid, "result": result}
+        # Mirror a real Streamable-HTTP server (e.g. Unreal/VibeUE): when the client
+        # advertises text/event-stream, answer with SSE and pretty-print the JSON one
+        # physical line per `data:` field. This is the multi-line shape that broke
+        # capture in issue #23 — keep it in CI so the regression can't return.
+        if "text/event-stream" in self.headers.get("Accept", ""):
+            pretty = json.dumps(payload, indent=2)
+            sse = "".join(f"data: {line}\n" for line in pretty.splitlines()) + "\n"
+            body = sse.encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.end_headers()
+            self.wfile.write(body)
+        else:
+            body = json.dumps(payload).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
 
 
 class _Threaded(socketserver.ThreadingMixIn, http.server.HTTPServer):
