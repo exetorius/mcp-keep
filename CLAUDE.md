@@ -105,11 +105,11 @@ Tell the user to start a new Claude session in that project to pick up the tools
 
 ## Step 6 — Start with OS (optional)
 
-Ask if they want mcp-keep to start automatically at login. If yes, the relay's own `/keep-setup` terminal command handles it, or do it directly:
+Ask if they want mcp-keep to start automatically at login. The easiest path is the `keep_start_with_os` MCP tool (undo with `keep_disable_start_with_os`); the relay's own `/keep-setup` terminal command does the same. Show the user the exact change first — it's a launch-surface effect. The underlying per-OS mechanism (all per-user, **no admin/elevation**):
 
-- **Windows:** `schtasks /Create /TN "mcp-keep" /TR "\"<python> \"<proxy.py>\"\"" /SC ONLOGON /RL HIGHEST /F`
-- **Mac:** write a launchd plist to `~/Library/LaunchAgents/com.mcp-keep.plist`
-- **Linux:** write a systemd user service to `~/.config/systemd/user/mcp-keep.service`
+- **Windows:** HKCU `Run` registry value `mcp-keep` → the launch command. (Not Task Scheduler — `schtasks /SC ONLOGON` requires elevation, which defeats enabling it conversationally.)
+- **Mac:** launchd plist at `~/Library/LaunchAgents/com.mcp-keep.plist`
+- **Linux:** systemd user service at `~/.config/systemd/user/mcp-keep.service`
 
 ---
 

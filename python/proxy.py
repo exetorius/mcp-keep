@@ -465,6 +465,7 @@ def error_result(req_id, text: str) -> dict:
 # dispatcher routes any name in this set to handle_management_call().
 MANAGEMENT_TOOL_NAMES = {
     "keep_status", "keep_install_pack", "keep_add_upstream", "keep_welcome",
+    "keep_start_with_os", "keep_disable_start_with_os",
 }
 
 def management_tools(state: "State") -> list[dict]:
@@ -532,6 +533,28 @@ def management_tools(state: "State") -> list[dict]:
                 "required": [],
             },
         })
+
+    # Start-with-OS controls. Deliberately NOT state-gated on startup_registered:
+    # the tool list is handshaked once per client session, so gating would leave
+    # the opposite tool unsurfaced after a mid-session flip — forcing a /mcp
+    # reload just to undo what you just did (issue #32). Both are always present
+    # and idempotent; the live steering toward Start-with-OS lives in keep_status
+    # text instead, which the relay regenerates on every call.
+    tools.append({
+        "name": "keep_start_with_os",
+        "description": ("Register mcp-keep to start automatically at login, so the relay is "
+                        "already up before any client session begins (the only zero-reload path). "
+                        "This changes the OS launch surface — a scheduled task (Windows), launchd "
+                        "agent (macOS), or systemd user service (Linux). Show the user the exact "
+                        "change and get explicit consent BEFORE calling. Idempotent."),
+        "inputSchema": {"type": "object", "properties": {}, "required": []},
+    })
+    tools.append({
+        "name": "keep_disable_start_with_os",
+        "description": ("Undo keep_start_with_os: remove mcp-keep from OS login startup. "
+                        "Idempotent — safe to call even if start-with-OS was never enabled."),
+        "inputSchema": {"type": "object", "properties": {}, "required": []},
+    })
     return tools
 
 def handle_management_call(req_id, tool_name: str, args: dict):
@@ -606,6 +629,20 @@ def handle_management_call(req_id, tool_name: str, args: dict):
                 lines.append(f"  • {name}: {state_str}, identity='{ident}', "
                              f"{len(tools)} cached tools, "
                              f"auth={'required' if st['auth_required'] else 'none'}")
+        # Self-quieting steer toward start-with-OS (issue #31). Shown only while
+        # NOT registered for OS startup — the instant keep_start_with_os flips the
+        # flag, this regenerates without the note (state lives in one place, no
+        # per-session cadence the long-lived relay couldn't track anyway).
+        # Phrased conditionally ("if ... aren't showing up") so it never false-
+        # alarms a working native session; the user who actually needs it is the
+        # one reading raw keep_status output because their tools didn't surface.
+        if not STATE.cfg.get("startup_registered"):
+            lines.append(
+                "\nNote: if mcp-keep's tools aren't showing up as tools in this chat, the "
+                "relay wasn't running when this session started. Restart the chat (or run "
+                "/mcp) to surface them — a client connects its tools once, at session start, "
+                "so this is how MCP works, not an mcp-keep bug. To avoid it for good, enable "
+                "start-with-OS (keep_start_with_os) so the relay is always up first.")
         return ok("\n".join(lines))
 
     if tool_name == "keep_install_pack":
@@ -627,6 +664,34 @@ def handle_management_call(req_id, tool_name: str, args: dict):
         if post:
             text += f"\n\n{post}"
         return ok(text)
+
+    if tool_name == "keep_start_with_os":
+        # Reload fresh so we persist alongside any concurrent change.
+        cfg = load_config()
+        if cfg.get("startup_registered"):
+            return ok("Start-with-OS is already enabled — nothing to do. "
+                      "Use keep_disable_start_with_os to turn it off.")
+        success, msg = register_startup()
+        if not success:
+            return error_result(req_id, f"Could not enable start-with-OS: {msg}")
+        cfg["startup_registered"] = True
+        cfg["startup_asked"] = True
+        save_config(cfg)
+        STATE.cfg = cfg
+        return ok(f"{msg} mcp-keep will be up before your next session — no client "
+                  "reload needed from now on.")
+
+    if tool_name == "keep_disable_start_with_os":
+        cfg = load_config()
+        if not cfg.get("startup_registered"):
+            return ok("Start-with-OS isn't enabled — nothing to do.")
+        success, msg = unregister_startup()
+        if not success:
+            return error_result(req_id, f"Could not disable start-with-OS: {msg}")
+        cfg["startup_registered"] = False
+        save_config(cfg)
+        STATE.cfg = cfg
+        return ok(f"{msg} mcp-keep will no longer start at login.")
 
     return error_result(req_id, f"Unknown management tool '{tool_name}'.")
 
@@ -900,14 +965,27 @@ def _launch_args() -> list[str]:
 def _launch_command() -> str:
     return " ".join(f'"{a}"' for a in _launch_args())
 
+# Per-user autostart on Windows. We use the HKCU Run key rather than Task
+# Scheduler: schtasks /SC ONLOGON requires an elevated (admin) session, which
+# defeats enabling start-with-OS conversationally from a normal chat. The Run
+# key is per-user, needs no admin, and is trivially reversible — the same
+# no-elevation class as VibeUE's documented shell:startup shortcut, but a single
+# registry value instead of a generated .lnk. (Console window at login is the
+# #8 windowed-build tradeoff, same as the startup-folder .bat.)
+_WIN_RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
+_WIN_RUN_VALUE = "mcp-keep"
+
 def register_startup() -> tuple[bool, str]:
     if _OS == "Windows":
-        cmd = (f'schtasks /Create /TN "mcp-keep" /TR \\"{_launch_command()}\\" '
-               f'/SC ONLOGON /RL HIGHEST /F')
-        r = subprocess.run(cmd, shell=True, capture_output=True)
-        if r.returncode == 0:
-            return True, "Registered via Task Scheduler — keep starts at login."
-        return False, f"Task Scheduler failed: {r.stderr.decode().strip()}"
+        import winreg
+        try:
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, _WIN_RUN_KEY, 0,
+                                winreg.KEY_SET_VALUE) as k:
+                winreg.SetValueEx(k, _WIN_RUN_VALUE, 0, winreg.REG_SZ,
+                                  _launch_command())
+            return True, "Registered in the HKCU Run key — keep starts at login (per-user, no admin)."
+        except OSError as e:
+            return False, f"Registry write failed: {e}"
     elif _OS == "Darwin":
         d = pathlib.Path.home() / "Library" / "LaunchAgents"
         d.mkdir(parents=True, exist_ok=True)
@@ -947,9 +1025,16 @@ WantedBy=default.target
 
 def unregister_startup() -> tuple[bool, str]:
     if _OS == "Windows":
-        r = subprocess.run('schtasks /Delete /TN "mcp-keep" /F', shell=True, capture_output=True)
-        return (r.returncode == 0), ("Removed from Task Scheduler." if r.returncode == 0
-                                     else f"Could not remove: {r.stderr.decode().strip()}")
+        import winreg
+        try:
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, _WIN_RUN_KEY, 0,
+                                winreg.KEY_SET_VALUE) as k:
+                winreg.DeleteValue(k, _WIN_RUN_VALUE)
+            return True, "Removed from the HKCU Run key."
+        except FileNotFoundError:
+            return True, "Was not in the HKCU Run key — nothing to remove."
+        except OSError as e:
+            return False, f"Registry delete failed: {e}"
     elif _OS == "Darwin":
         plist = pathlib.Path.home() / "Library" / "LaunchAgents" / "com.mcp-keep.plist"
         subprocess.run(["launchctl", "unload", str(plist)], capture_output=True)
