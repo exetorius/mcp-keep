@@ -51,7 +51,7 @@ PACKS_REPO   = "exetorius/mcp-keep-integrations"
 PACKS_BRANCH = "main"
 
 SERVER_NAME = "mcp-keep"
-VERSION     = "1.0.0"
+VERSION     = "1.1.0"
 
 # MCP protocol revision (the spec versions revisions by date, not semver).
 # Pinned to the oldest stable revision for maximum upstream interop; the only
@@ -1141,6 +1141,30 @@ def command_loop():
 # Entry point
 # ---------------------------------------------------------------------------
 
+def wait_ready(timeout: float = 20.0, interval: float = 0.4) -> bool:
+    """Poll the local health endpoint until the relay answers, or timeout.
+
+    Console-independent readiness probe (#39): a launcher runs the relay
+    detached, then `mcp-keep --wait-ready` blocks here until `GET /mcp`
+    returns the running banner — instead of a fixed sleep + single probe that
+    false-negatives under the first-launch penalty (AV scan + onedir unpack)
+    and tempts a relaunch (which races two processes for the port). Probes
+    HTTP, not stdout, so it still works when the relay runs windowless (#8).
+    """
+    port = int(load_config()["listen_port"])
+    url = f"http://127.0.0.1:{port}/mcp"
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            with urllib.request.urlopen(url, timeout=2) as resp:
+                if resp.status == 200 and b"mcp-keep running" in resp.read():
+                    return True
+        except (urllib.error.URLError, ConnectionError, OSError):
+            pass  # not bound yet — a slow first start is expected, keep polling
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(interval)
+
 def main():
     global STATE
     try:                                  # keep em-dash / bullet output sane on Windows consoles
@@ -1198,4 +1222,8 @@ def main():
         log("keep stopped.")
 
 if __name__ == "__main__":
+    if "--wait-ready" in sys.argv[1:]:
+        # Readiness probe for launchers (#39): exit 0 once the relay answers,
+        # 1 on timeout. Does NOT start a relay — only polls an existing one.
+        sys.exit(0 if wait_ready() else 1)
     main()
