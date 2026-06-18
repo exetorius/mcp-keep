@@ -54,6 +54,8 @@ To install manually instead:
 
 Write `~/.mcp-keep/config.json` with the user's upstream(s). Ask for the bearer token only if the upstream needs one (the pack README will say; mcp-keep also auto-detects required auth by probing for a `401`). Example:
 
+**During first setup, put the upstream(s) directly in this file — do *not* defer to `keep_add_upstream`.** That tool is an MCP tool, so it can only run *after* the client has reloaded to surface it; adding an upstream that way forces a *second* reload before the fronted tools appear (the client handshakes its tool list once per session). Writing the upstream into `config.json` up front means a single reload (Step 5) surfaces both the `keep_*` tools and the fronted upstream's tools together. Reserve `keep_add_upstream` for adding upstreams *later*, to an already-connected client.
+
 ```json
 {
   "listen_port": 8089,
@@ -72,7 +74,7 @@ Start the relay (background, persistent across the session):
 cd "path/to/mcp-keep/python" && python proxy.py &
 ```
 
-Verify it's up:
+Verify it's up — **poll, don't fixed-sleep-then-give-up:**
 
 ```bash
 curl http://127.0.0.1:8089/mcp        # → "mcp-keep running"
@@ -80,7 +82,9 @@ netstat -ano | findstr :8089          # Windows
 lsof -i :8089                         # Mac/Linux
 ```
 
-The relay serves the tool list from cache immediately, even if the upstream isn't running yet — that's expected and is the whole point.
+The **first** launch of a freshly built/downloaded binary can take several seconds to bind (OS scans the new exe; a PyInstaller bundle unpacks its runtime on first run). **Retry the probe for ~15–20s** (e.g. every 0.5s) rather than probing once and declaring failure — and **never relaunch on a slow start**, or you get two processes racing for the port (violates the no-second-relay rule). A slow first start is expected.
+
+The relay serves the tool list from cache immediately, even if the upstream isn't running yet — that's expected and is the whole point. **Caveat on a brand-new home:** there's no cache until the *first successful capture*, so on a fresh `~/.mcp-keep` the fronted tools won't surface until the upstream has been reachable once. To get the smooth single-reload experience, have the upstream up before that first reload so it captures (~`capture_interval_seconds`). Pre-seeding the cache at install time is tracked in issue #35.
 
 ---
 
