@@ -10,6 +10,12 @@ name: Release
 # orphan, and FIRST_TIME_SETUP.md must ship alongside it — the setup assistant reads
 # that file to wire the client and launch the relay correctly. Without it, a fresh
 # download has nothing to set up from.
+#
+# Windowless on Windows (issue #8): `mcp-keep.exe` is built --noconsole so double-
+# clicking / autostart never pops a console window — the relay is driven entirely by
+# the AI over MCP, and its logs go to ~/.mcp-keep/keep.log (so no console is needed for
+# debugging). macOS/Linux have no console-allocation problem (launchd/systemd, no
+# double-click), so they keep the --console build.
 on:
   push:
     tags: ["v*"]
@@ -47,8 +53,17 @@ jobs:
       - name: Install PyInstaller
         run: python -m pip install --upgrade pip pyinstaller
 
-      - name: Build onedir bundle
-        run: pyinstaller --onedir --name mcp-keep --console python/proxy.py
+      - name: Build onedir bundle (windowless on Windows)
+        shell: bash
+        run: |
+          # Windows exe is --noconsole so no console window ever pops (#8); logs go to
+          # ~/.mcp-keep/keep.log instead. macOS/Linux keep --console; they have no
+          # GUI-subsystem console to suppress (launchd/systemd, no double-click).
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            pyinstaller --onedir --name mcp-keep --noconsole python/proxy.py
+          else
+            pyinstaller --onedir --name mcp-keep --console python/proxy.py
+          fi
 
       - name: Smoke test the built binary
         run: python tests/smoke_binary.py "dist/mcp-keep/mcp-keep${{ matrix.ext }}"
