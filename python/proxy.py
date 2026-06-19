@@ -61,10 +61,57 @@ MCP_PROTOCOL_VERSION = "2024-11-05"
 # ---------------------------------------------------------------------------
 # Logging
 # ---------------------------------------------------------------------------
+#
+# When packaged windowless (PyInstaller --windowed / --noconsole, issue #8),
+# sys.stdout is None and any bare print() would crash the relay. So the log
+# file is the load-bearing output channel: log() always writes to keep.log and
+# only *mirrors* to stdout when a real console exists (the dev path). Guarded
+# with a lock because capture threads + request handlers log concurrently.
+
+LOG_PATH = KEEP_HOME / "keep.log"
+_log_lock = threading.Lock()
+
+def init_log() -> None:
+    """Truncate keep.log at startup and write a session header. Called once
+    from main() after KEEP_HOME exists."""
+    try:
+        with _log_lock:
+            with open(LOG_PATH, "w", encoding="utf-8") as fh:
+                ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+                fh.write(f"=== mcp-keep {VERSION} session started {ts} ===\n")
+    except OSError:
+        pass  # logging must never take the relay down
+
+def _interactive_console() -> bool:
+    """True only when a human is at a real terminal we can both read and write.
+
+    Gates the setup menu and command loop, which call input() and would hang or
+    crash with no console. We require BOTH stdin and stdout to be ttys because a
+    PyInstaller --windowed build (issue #8) makes sys.stdin.isatty() unreliable —
+    it can report a tty when there is no console at all — so checking stdin alone
+    would let the interactive menu run in a windowless process. stdout is None (or
+    a redirected non-tty) in exactly those cases, so it's the reliable tell."""
+    try:
+        return bool(sys.stdin and sys.stdin.isatty()
+                    and sys.stdout and sys.stdout.isatty())
+    except (ValueError, OSError, AttributeError):
+        return False
 
 def log(msg: str) -> None:
     ts = datetime.now(timezone.utc).strftime("%H:%M:%S")
-    print(f"[{ts}] {msg}", flush=True)
+    line = f"[{ts}] {msg}"
+    try:
+        with _log_lock:
+            with open(LOG_PATH, "a", encoding="utf-8") as fh:
+                fh.write(line + "\n")
+    except OSError:
+        pass  # never crash on a logging failure
+    # Mirror to the console for the dev path; absent/closed under --windowed.
+    if sys.stdout is not None:
+        try:
+            print(line, flush=True)
+        except (ValueError, OSError):
+            pass
 
 # ---------------------------------------------------------------------------
 # Known-packs registry — shipped defaults, matched against an upstream's
@@ -1215,10 +1262,11 @@ def main():
         pass
     KEEP_HOME.mkdir(parents=True, exist_ok=True)
     INTEGRATIONS_DIR.mkdir(parents=True, exist_ok=True)
+    init_log()
     STATE = State()
 
     port = int(STATE.cfg["listen_port"])
-    is_tty = bool(sys.stdin and sys.stdin.isatty())
+    is_tty = _interactive_console()
 
     # Report what we loaded from cache (the moat: tools available before any capture)
     total_cached = sum(len(st["manifest"].get("tools", [])) for st in STATE.upstreams.values())
@@ -1229,7 +1277,9 @@ def main():
     # First-run greeting — this is the "I just downloaded and ran it" moment.
     # mcp-keep does nothing on its own; it is driven by an AI MCP client. Make
     # that obvious instead of sitting silently with an empty tool list.
-    if not STATE.cfg["upstreams"]:
+    # Console-only: under --windowed there is no stdout (would crash) and no
+    # window to read it; the windowless sign-of-life lives in the bundle README.
+    if is_tty and not STATE.cfg["upstreams"]:
         print(
             "\n"
             "  ──────────────────────────────────────────────────────────────\n"

@@ -75,6 +75,60 @@ class _Threaded(socketserver.ThreadingMixIn, http.server.HTTPServer):
     allow_reuse_address = True
 
 
+def check_windowless(check) -> None:
+    """Regression for issue #8: under PyInstaller --windowed, sys.stdout/stderr/stdin
+    are None and any bare print() would crash the relay. DEVNULL gives a *valid* handle
+    so it can't reproduce this — instead spawn a child that nulls its own std streams,
+    then prove the relay still binds, serves, and writes ~/.mcp-keep/keep.log."""
+    home = tempfile.mkdtemp(prefix="keep-windowless-")
+    port = RELAY_PORT + 100  # isolated from the main test's relay
+    pathlib.Path(home, "config.json").write_text(json.dumps(
+        {"listen_port": port, "capture_interval_seconds": 5, "upstreams": []}))
+    python_dir = str((REPO_ROOT / "python").resolve())
+    # Mimic a PyInstaller --windowed process precisely: stdout/stderr are None, and
+    # stdin *claims to be a tty* (the quirk that made isatty()-only gating run the
+    # interactive setup menu and hang). If the relay still serves, the menu/command
+    # loop were correctly skipped despite the lying stdin.
+    child = (
+        "import sys\n"
+        "class _FakeTTY:\n"
+        "    def isatty(self): return True\n"
+        "    def readline(self, *a): return ''\n"
+        "    def read(self, *a): return ''\n"
+        "sys.stdout = None; sys.stderr = None; sys.stdin = _FakeTTY()\n"
+        f"sys.path.insert(0, {python_dir!r})\n"
+        "import proxy\n"
+        "proxy.main()\n"
+    )
+    env = dict(os.environ, MCP_KEEP_HOME=home)
+    relay = subprocess.Popen([sys.executable, "-c", child], env=env,
+                             stdin=subprocess.DEVNULL,
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    try:
+        deadline, bound = time.time() + 30, False
+        while time.time() < deadline:
+            if relay.poll() is not None:
+                break  # crashed — bound stays False
+            try:
+                with opener.open(f"http://127.0.0.1:{port}/mcp", timeout=3) as r:
+                    if b"mcp-keep running" in r.read():
+                        bound = True
+                        break
+            except Exception:
+                time.sleep(0.25)
+        check("WINDOWLESS (#8): relay binds + serves with std streams None", bound)
+        log = pathlib.Path(home, "keep.log")
+        check("WINDOWLESS (#8): keep.log written when no console",
+              log.exists() and len(log.read_text(encoding="utf-8").strip()) > 0)
+    finally:
+        relay.terminate()
+        try:
+            relay.wait(timeout=5)
+        except Exception:
+            relay.kill()
+
+
 def main() -> int:
     home = tempfile.mkdtemp(prefix="keep-itest-")
     # Pre-seed config so capture polls quickly (capture_loop enforces a 5s floor).
@@ -148,6 +202,8 @@ def main() -> int:
             fails.append(label)
 
     try:
+        check_windowless(check)
+
         names = tool_names()
         check("first-run shows keep_welcome", "keep_welcome" in names)
         check("first-run shows keep_add_upstream", "keep_add_upstream" in names)

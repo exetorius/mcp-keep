@@ -30,6 +30,8 @@ It will:
 - listen on `http://127.0.0.1:8089/mcp`,
 - run fine with **zero upstreams configured** — that's expected on first run.
 
+> **No window appears — that's intended.** On Windows `mcp-keep.exe` is **windowless**: launching it pops no console, and there is no window to leave open. This is the steady state — mcp-keep is meant to run out of sight and be driven by you (the AI) over MCP. So **don't take the absence of a window as "it didn't start"** — confirm it the right way (below). Its log goes to `~/.mcp-keep/keep.log` instead of a console; `tail` that file to see what it's doing. (macOS/Linux have no console-popup to begin with.)
+
 Confirm it's up — **poll, don't fixed-sleep-then-give-up:**
 
 ```
