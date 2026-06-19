@@ -77,7 +77,8 @@ cd "path/to/mcp-keep/python" && python proxy.py &
 Verify it's up — **poll, don't fixed-sleep-then-give-up:**
 
 ```bash
-curl http://127.0.0.1:8089/mcp        # → "mcp-keep running"
+python proxy.py --wait-ready          # blocks until ready (exit 0=up, 1=timeout); never starts a 2nd relay
+curl http://127.0.0.1:8089/mcp        # or probe by hand → "mcp-keep running"
 netstat -ano | findstr :8089          # Windows
 lsof -i :8089                         # Mac/Linux
 ```

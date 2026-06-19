@@ -33,14 +33,15 @@ It will:
 Confirm it's up — **poll, don't fixed-sleep-then-give-up:**
 
 ```
-curl http://127.0.0.1:8089/mcp        # → "mcp-keep running"
+mcp-keep --wait-ready                  # blocks until ready; exit 0 = up, 1 = timeout
+curl http://127.0.0.1:8089/mcp         # or probe by hand → "mcp-keep running"
 ```
 
-The **first** launch of a freshly downloaded binary can take several seconds to start listening (the OS may scan the new executable, and a bundled binary unpacks its runtime on first run). So **retry the probe for ~15–20s** (e.g. every 0.5s) until it returns `mcp-keep running`. **Do not conclude "it didn't start" after a single probe, and do not relaunch it** — relaunching while the first instance is still coming up leaves you with two processes racing for the port. A slow first start is expected, not a failure.
+`mcp-keep --wait-ready` does the poll-with-retry for you (it only probes — it never starts a second relay), so prefer it over a hand-rolled sleep loop. The **first** launch of a freshly downloaded binary can take several seconds to start listening (the OS may scan the new executable, and a bundled binary unpacks its runtime on first run). So **retry the probe for ~15–20s** (e.g. every 0.5s) until it returns `mcp-keep running`. **Do not conclude "it didn't start" after a single probe, and do not relaunch it** — relaunching while the first instance is still coming up leaves you with two processes racing for the port. A slow first start is expected, not a failure.
 
 If port 8089 is genuinely taken by something else, check whether mcp-keep is already running before starting another one — never start a second relay on the same port.
 
-> **Want it always running** (across reboots, with no relaunch)? That's the durable path — set up Start-with-OS. The relay's own `/keep-setup` terminal command registers it (Windows scheduled task / macOS launchd / Linux systemd user service). A detached launch survives until the machine is rebooted; Start-with-OS survives that too.
+> **Want it always running** (across reboots, with no relaunch)? That's the durable path — set up Start-with-OS. The `keep_start_with_os` tool (or the relay's own `/keep-setup` terminal command) registers it, with **no admin/elevation** (Windows HKCU `Run` registry value / macOS launchd / Linux systemd user service). A detached launch survives until the machine is rebooted; Start-with-OS survives that too.
 
 ---
 
