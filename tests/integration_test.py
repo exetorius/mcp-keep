@@ -248,6 +248,38 @@ def main() -> int:
                                          "integration": "SeedPack"}}, 6)
         check("SEED (#35): pack-seeded tool surfaces before first-ever connect",
               "seeded_only_tool" in tool_names())
+
+        # #47 — config hot-reload: a hand-edit to config.json must reach a running
+        # relay with no restart (the windowless build has no console for /keep-reload).
+        cfg_path = pathlib.Path(home, "config.json")
+        check("RELOAD (#47): keep_reload tool is offered", "keep_reload" in tool_names())
+
+        def handedit_add(label):
+            """Simulate a human editing config.json directly (not via keep_add_upstream)."""
+            cfg = json.loads(cfg_path.read_text())
+            cfg["upstreams"].append({"name": label, "host": "127.0.0.1", "port": 9,
+                                     "path": "/", "integration": "SeedPack"})
+            cfg_path.write_text(json.dumps(cfg))
+
+        def status_text():
+            s = rpc("tools/call", {"name": "keep_status", "arguments": {}}, 9)
+            return s["result"]["content"][0]["text"]
+
+        # (a) explicit client-driven reload of a hand-edit.
+        handedit_add("handedit")
+        rpc("tools/call", {"name": "keep_reload", "arguments": {}}, 7)
+        check("RELOAD (#47): keep_reload applies a hand-edited config",
+              "handedit" in status_text())
+
+        # (b) automatic hot-reload via mtime watch — no tool call, within one interval.
+        handedit_add("hotedit")
+        deadline, seen = time.time() + 12, False
+        while time.time() < deadline:
+            if "hotedit" in status_text():
+                seen = True
+                break
+            time.sleep(1)
+        check("HOT-RELOAD (#47): config.json mtime change auto-applies", seen)
     except Exception as e:  # noqa: BLE001 - surface anything as a failure
         check(f"unexpected exception: {e!r}", False)
     finally:

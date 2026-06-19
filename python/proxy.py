@@ -52,7 +52,7 @@ PACKS_REPO   = "exetorius/mcp-keep-integrations"
 PACKS_BRANCH = "main"
 
 SERVER_NAME = "mcp-keep"
-VERSION     = "1.2.0"
+VERSION     = "1.3.0"
 
 # MCP protocol revision (the spec versions revisions by date, not semver).
 # Pinned to the oldest stable revision for maximum upstream interop; the only
@@ -175,6 +175,38 @@ def load_config() -> dict:
 def save_config(cfg: dict) -> None:
     KEEP_HOME.mkdir(parents=True, exist_ok=True)
     CONFIG_PATH.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
+
+# config.json hot-reload (#47): a hand-edit must take effect on a running relay
+# without a restart. The windowless build has no console, so the old /keep-reload
+# terminal command is unreachable — the capture loop watches the file's mtime and
+# the keep_reload tool offers an explicit client-driven trigger. Both funnel
+# through reload_config() so config, registry, and cache stay consistent.
+_last_config_mtime = 0.0
+
+def _config_mtime() -> float:
+    try:
+        return CONFIG_PATH.stat().st_mtime
+    except OSError:
+        return 0.0
+
+def _sync_config_mtime() -> None:
+    """Mark the on-disk config as 'already loaded' so a write we just made
+    ourselves (e.g. keep_add_upstream) doesn't trigger a redundant hot-reload."""
+    global _last_config_mtime
+    _last_config_mtime = _config_mtime()
+
+def reload_config(reason: str = "") -> int:
+    """Re-read config.json + registry and rebuild routing/cache from them.
+    Shared by /keep-reload, the keep_reload tool, and the capture-loop hot-reload.
+    Returns the count of configured (named) upstreams."""
+    STATE.cfg = load_config()
+    STATE.registry = load_registry()
+    STATE.rebuild_from_cache()
+    _sync_config_mtime()
+    n = sum(1 for u in STATE.cfg["upstreams"] if u.get("name"))
+    if reason:
+        log(f"config reloaded ({reason}) — {n} upstream(s) configured")
+    return n
 
 def upstream_url(u: dict) -> str:
     return f"http://{u['host']}:{u['port']}{u['path']}"
@@ -502,8 +534,14 @@ def _safe_capture(u: dict):
         log(f"capture error for '{u['name']}': {e}")
 
 def capture_loop():
-    """Background re-attach: poll every upstream; refresh cache when reachable."""
+    """Background re-attach: poll every upstream; refresh cache when reachable.
+    Also hot-reloads config.json when it changes on disk (#47), so a hand-edited
+    config takes effect within one capture interval — no restart, no console."""
+    _sync_config_mtime()
     while True:
+        mt = _config_mtime()
+        if mt and mt != _last_config_mtime:
+            reload_config("config.json changed on disk")
         for u in list(STATE.cfg["upstreams"]):
             _safe_capture(u)
         time.sleep(max(5, int(STATE.cfg.get("capture_interval_seconds", 30))))
@@ -555,7 +593,7 @@ def error_result(req_id, text: str) -> dict:
 # dispatcher routes any name in this set to handle_management_call().
 MANAGEMENT_TOOL_NAMES = {
     "keep_status", "keep_install_pack", "keep_add_upstream", "keep_welcome",
-    "keep_start_with_os", "keep_disable_start_with_os",
+    "keep_start_with_os", "keep_disable_start_with_os", "keep_reload",
 }
 
 def management_tools(state: "State") -> list[dict]:
@@ -607,6 +645,17 @@ def management_tools(state: "State") -> list[dict]:
             },
             "required": ["name"],
         },
+    })
+
+    # Apply a hand-edited config.json without a restart. The capture loop also
+    # hot-reloads on file change within one interval; this is the explicit, instant
+    # trigger that replaces the console-only /keep-reload for the windowless build.
+    tools.append({
+        "name": "keep_reload",
+        "description": ("Re-read ~/.mcp-keep/config.json and integration packs, applying any "
+                        "hand-edits to a running relay without a restart. Use after editing the "
+                        "config file directly. Returns the refreshed upstream status."),
+        "inputSchema": {"type": "object", "properties": {}, "required": []},
     })
 
     # Offer pack install whenever an upstream has no integration set.
@@ -696,6 +745,7 @@ def handle_management_call(req_id, tool_name: str, args: dict):
         save_config(cfg)
         STATE.cfg = cfg
         STATE.rebuild_from_cache()
+        _sync_config_mtime()   # our own write — don't let the hot-reload re-fire on it
         # Attach immediately rather than waiting for the next capture poll.
         threading.Thread(target=_safe_capture, args=(new_u,), daemon=True).start()
         extra = ""
@@ -705,6 +755,11 @@ def handle_management_call(req_id, tool_name: str, args: dict):
             extra += f", pack='{new_u['integration']}'"
         return ok(f"Added upstream '{name}' -> {upstream_url(new_u)}{extra}. "
                   "Capturing its tools now — call keep_status in a moment to confirm.")
+
+    if tool_name == "keep_reload":
+        n = reload_config("keep_reload tool")
+        return ok(f"Reloaded config + integration packs — {n} upstream(s) configured. "
+                  "Call keep_status to see each upstream's current health and cached tool count.")
 
     if tool_name == "keep_status":
         lines = [f"mcp-keep — listening on 127.0.0.1:{STATE.cfg['listen_port']}"]
@@ -1196,13 +1251,11 @@ def cmd_packs():
         post = run_post_install(INTEGRATIONS_DIR / name)
         if post:
             print(f"  {post}", flush=True)
-        STATE.cfg = load_config(); STATE.rebuild_from_cache()
+        STATE.cfg = load_config(); STATE.rebuild_from_cache(); _sync_config_mtime()
 
 def cmd_reload():
-    STATE.cfg = load_config()
-    STATE.registry = load_registry()
-    STATE.rebuild_from_cache()
-    print("  Reloaded config + integrations.", flush=True)
+    n = reload_config("/keep-reload")
+    print(f"  Reloaded config + integrations — {n} upstream(s).", flush=True)
 
 def run_setup_menu():
     print("\n  mcp-keep — start with your OS?\n", flush=True)

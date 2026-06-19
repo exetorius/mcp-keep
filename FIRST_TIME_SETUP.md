@@ -120,7 +120,7 @@ Only after an upstream is attached and working:
 
 ## Reference — config shape (for the rare case you must edit by hand)
 
-Prefer the `keep_*` tools. Only fall back to editing `~/.mcp-keep/config.json` directly if a tool isn't available (e.g. a pre-launch edit before any client is connected). **Never commit this file — it can contain a bearer token.**
+Prefer the `keep_*` tools. Only fall back to editing `~/.mcp-keep/config.json` directly if a tool isn't available (e.g. a pre-launch edit before any client is connected). A hand-edit to a *running* relay is picked up automatically within one capture interval (the relay watches the file's mtime), or immediately if you call **`keep_reload`** — no restart needed. **Never commit this file — it can contain a bearer token.**
 
 ```json
 {

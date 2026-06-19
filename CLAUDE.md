@@ -117,6 +117,8 @@ Ask if they want mcp-keep to start automatically at login. The easiest path is t
 
 ## Reference — config keys
 
+A hand-edit to `~/.mcp-keep/config.json` on a *running* relay is picked up automatically within one `capture_interval_seconds` (the relay watches the file's mtime), or instantly via the **`keep_reload`** tool — no restart. (The `/keep-reload` terminal command still works but is unreachable in the windowless build, which has no console.)
+
 | Key | Description |
 |---|---|
 | `listen_port` | Single master port the client connects to (default 8089) |
