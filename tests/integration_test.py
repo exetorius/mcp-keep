@@ -15,6 +15,7 @@ import http.server
 import json
 import os
 import pathlib
+import socket
 import socketserver
 import subprocess
 import sys
@@ -23,8 +24,32 @@ import threading
 import time
 import urllib.request
 
-RELAY_PORT = int(os.environ.get("RELAY_PORT", "8089"))
-UP_PORT    = int(os.environ.get("UP_PORT", "9555"))
+
+def _free_port() -> int:
+    """Grab an OS-assigned free loopback port. Used as the default so the suite
+    can NEVER collide with a running production relay on :8089 (#44)."""
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+    finally:
+        s.close()
+
+
+def _port_listening(port: int) -> bool:
+    """True if something is already accepting on 127.0.0.1:port."""
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.settimeout(0.5)
+    try:
+        return s.connect_ex(("127.0.0.1", port)) == 0
+    finally:
+        s.close()
+
+
+# Default to OS-assigned free ports (structurally collision-proof). An explicit
+# env override is honored but guarded below so it can't hijack a live relay (#44).
+RELAY_PORT = int(os.environ["RELAY_PORT"]) if os.environ.get("RELAY_PORT") else _free_port()
+UP_PORT    = int(os.environ["UP_PORT"])    if os.environ.get("UP_PORT")    else _free_port()
 REPO_ROOT  = pathlib.Path(__file__).resolve().parent.parent
 PROXY      = REPO_ROOT / "python" / "proxy.py"
 
@@ -81,7 +106,7 @@ def check_windowless(check) -> None:
     so it can't reproduce this — instead spawn a child that nulls its own std streams,
     then prove the relay still binds, serves, and writes ~/.mcp-keep/keep.log."""
     home = tempfile.mkdtemp(prefix="keep-windowless-")
-    port = RELAY_PORT + 100  # isolated from the main test's relay
+    port = _free_port()  # isolated from the main test's relay (#44)
     pathlib.Path(home, "config.json").write_text(json.dumps(
         {"listen_port": port, "capture_interval_seconds": 5, "upstreams": []}))
     python_dir = str((REPO_ROOT / "python").resolve())
@@ -130,6 +155,16 @@ def check_windowless(check) -> None:
 
 
 def main() -> int:
+    # Fail fast rather than hijack a live relay: if the chosen port is already
+    # serving (only possible via an explicit RELAY_PORT override now), abort with a
+    # clear message instead of silently testing the wrong process + writing the
+    # test's throwaway upstreams into the real ~/.mcp-keep/config.json (#44).
+    if _port_listening(RELAY_PORT):
+        print(f"ABORT: 127.0.0.1:{RELAY_PORT} is already in use — refusing to run so "
+              f"the suite can't hijack a live relay or corrupt real config (#44). "
+              f"Unset RELAY_PORT to auto-pick a free port.", flush=True)
+        return 1
+
     home = tempfile.mkdtemp(prefix="keep-itest-")
     # Pre-seed config so capture polls quickly (capture_loop enforces a 5s floor).
     pathlib.Path(home, "config.json").write_text(json.dumps(
