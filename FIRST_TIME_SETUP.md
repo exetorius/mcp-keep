@@ -2,17 +2,23 @@
 
 **If a human asked you (an AI assistant) to "set up keep" or "read the first-time setup file and set it up," this file is your instructions. Do the steps — don't just describe them. Show the human every privileged change before you make it; never do a silent install.**
 
+> **Read this first — the one rule that governs everything below.** Set up in **layers, in order, and stop at each layer until it works**: (1) the **core relay**, (2) *then* an **upstream**, (3) *then* an optional **integration pack**. Each later layer is the human's explicit choice, made **one decision at a time**. You must **never** run ahead — never pick an upstream, a bearer token, or a pack *for* the human to save a step or a reload. The whole point of mcp-keep's first principle is that every privileged effect is explicit and consented. A setup that "helpfully" attaches a pack and guesses a bearer on the human's behalf is a **failed** setup, even if it works.
+
 ---
 
 ## What mcp-keep is
 
 mcp-keep is a **lifecycle/resilience layer for MCP**. It fronts one or more upstream MCP servers on a single local port (default `8089`) and keeps their tools surfaced to this client **even while an upstream is offline**, re-attaching silently when it returns. It is not an auth proxy — a per-upstream bearer token is an optional extra, not the point.
 
-It does nothing on its own: it needs an AI MCP client (you) connected to it. Your job here is to get that connection made, then let mcp-keep guide the rest.
+The **relay is the product**. It runs perfectly well with **zero upstreams** — that's the core, and standing it up is the entire goal of Phase 1. Upstreams and packs come *after*, only if the human wants them.
 
 ---
 
-## Step 1 — Start the relay (detached, so it outlives this chat)
+# Phase 1 — Stand up the core (the relay)
+
+**This is the whole job until it's done.** Do not ask about upstreams, bearer tokens, or integration packs yet. The success condition for this phase is: the relay is running, this client is wired to it, and the `keep_*` tools are callable — with **no upstreams configured**. That is a complete, healthy mcp-keep.
+
+## Step 1.1 — Start the relay (detached, so it outlives this chat)
 
 In the folder this file came in, find the mcp-keep program:
 
@@ -28,7 +34,7 @@ In the folder this file came in, find the mcp-keep program:
 It will:
 - create its home at `~/.mcp-keep/` (override with the `MCP_KEEP_HOME` env var),
 - listen on `http://127.0.0.1:8089/mcp`,
-- run fine with **zero upstreams configured** — that's expected on first run.
+- run fine with **zero upstreams configured** — that's the expected, correct first-run state. Do not add one to "finish" setup.
 
 > **No window appears — that's intended.** On Windows `mcp-keep.exe` is **windowless**: launching it pops no console, and there is no window to leave open. This is the steady state — mcp-keep is meant to run out of sight and be driven by you (the AI) over MCP. So **don't take the absence of a window as "it didn't start"** — confirm it the right way (below). Its log goes to `~/.mcp-keep/keep.log` instead of a console; `tail` that file to see what it's doing. (macOS/Linux have no console-popup to begin with.)
 
@@ -43,11 +49,9 @@ curl http://127.0.0.1:8089/mcp         # or probe by hand → "mcp-keep running"
 
 If port 8089 is genuinely taken by something else, check whether mcp-keep is already running before starting another one — never start a second relay on the same port.
 
-> **Want it always running** (across reboots, with no relaunch)? That's the durable path — set up Start-with-OS. The `keep_start_with_os` tool (or the relay's own `/keep-setup` terminal command) registers it, with **no admin/elevation** (Windows HKCU `Run` registry value / macOS launchd / Linux systemd user service). A detached launch survives until the machine is rebooted; Start-with-OS survives that too.
+> **Want it always running** (across reboots, with no relaunch)? That's the durable path — set up Start-with-OS. The `keep_start_with_os` tool (or the relay's own `/keep-setup` terminal command) registers it, with **no admin/elevation** (Windows HKCU `Run` registry value / macOS launchd / Linux systemd user service). A detached launch survives until the machine is rebooted; Start-with-OS survives that too. This is an offer, not a default — show the human the exact change first.
 
----
-
-## Step 2 — Wire THIS client to the relay (the one manual bootstrap)
+## Step 1.2 — Wire THIS client to the relay (the one manual bootstrap)
 
 This is the step that can only happen outside chat: your client needs a pointer to the relay before it can see mcp-keep's tools. Add an MCP server entry pointing at `http://127.0.0.1:8089/mcp`, using **whatever config mechanism your client uses**. Show the human the change first.
 
@@ -66,38 +70,57 @@ This is the step that can only happen outside chat: your client needs a pointer 
 
 - **Other clients (Claude Desktop, Cursor, etc.)** — add an HTTP/remote MCP server pointing at the same URL, in that client's own config file/format. Use the method documented for your client.
 
-**First-time bootstrap tip — add the upstream *before* this reload.** On a brand-new install there's no connected client yet, so `keep_add_upstream` (an MCP tool) isn't callable — this is exactly the "fall back to editing `config.json`" case (see Reference below). Ask the human now for their upstream's `host`/`port`/`path` (and bearer if needed) and write it into `~/.mcp-keep/config.json` *before* you reload. Why: the client handshakes its tool list **once per session**, so a single reload here surfaces both the `keep_*` tools **and** the fronted upstream's tools together. If you skip this and add the upstream afterward via `keep_add_upstream`, you'll need a **second reload** before the fronted tools appear. (For best results have the upstream reachable so it captures first — on a fresh home there's no cache until the first successful capture.) Use `keep_add_upstream` for adding *further* upstreams later, to an already-connected client.
-
-**Offer an integration pack — even when the user already knows their host/port.** A pack is *not* just a host/port lookup; it ships tool **hints, synthetic tools, and agent instructions** tailored to a specific upstream (e.g. VibeUE / Unreal), which is exactly what makes the fronted tools usable rather than a raw list. So whenever you know which server they're attaching, browse the registry and offer a match — don't reserve packs for the "they don't know their host/port" case. Browse it at `https://api.github.com/repos/exetorius/mcp-keep-integrations/contents/` (entries with `type: "dir"`, skipping dotfolders), name any that fit their server, and ask if they want one. If they pick one, set `"integration": "<pack>"` on the upstream you write into `config.json` here, then install the pack's files **after** the reload with `keep_install_pack name='<pack>'` (it isn't callable yet — no client is connected during this bootstrap).
-
 Then tell the human to **reload their AI client** so it picks up mcp-keep — in Claude Code, run `/mcp` and reconnect the `mcp-keep` server (a full restart also works).
 
-**This reload is required, not optional.** If the client was already running when you started the relay, its first attempt to reach mcp-keep failed (the relay wasn't up yet) and it will **not** re-handshake on its own mid-session — so `keep_*` won't appear as callable tools until you reload. Don't work around this with raw HTTP/`curl`; just reload, then drive everything through the tools. It's a one-time bootstrap step: with **Start-with-OS** (Step 1) the relay is always up *before* any session starts, so the tools surface with no reload at all.
+**This reload is required, not optional.** If the client was already running when you started the relay, its first attempt to reach mcp-keep failed (the relay wasn't up yet) and it will **not** re-handshake on its own mid-session — so `keep_*` won't appear as callable tools until you reload. Don't work around this with raw HTTP/`curl`; just reload, then drive everything through the tools. (With **Start-with-OS** the relay is always up *before* any session starts, so the tools surface with no reload at all.)
+
+## Step 1.3 — Confirm the core is healthy — then stop
+
+After the reload, mcp-keep's tools are available to you. Call **`keep_status`**. With zero upstreams it will report the relay is up and healthy with nothing attached — **this is success.** Tell the human the core is running.
+
+**Phase 1 is now complete.** Do not silently roll into adding an upstream. Instead, tell the human what they have (a running relay, no upstreams yet) and ask whether they'd like to **attach an upstream MCP server** now. If they don't want to, you're done — leave it here.
 
 ---
 
-## Step 3 — Connect and finish setup in chat
+# Phase 2 — Attach an upstream (only when the human asks)
 
-After the reload, mcp-keep's tools are available to you. From here, **everything happens through the relay's own tools — you should not hand-edit config files** (the one exception was the bootstrap upstream in Step 2, before any tool was callable).
-
-**If you already wrote the upstream into `config.json` during Step 2's bootstrap tip:** just call **`keep_status`** to confirm it attached and see the cached tool count — you're done.
-
-Otherwise, add it now through the tools:
+Do this **only after Phase 1 is confirmed working** and the human has said they want to attach a server. From here on, everything happens through the relay's own tools — **do not hand-edit config files** (the rare exception is in the Reference below). Work through these **one decision at a time**, confirming each with the human; do not batch them or fill in answers yourself.
 
 1. Call **`keep_welcome`** — it returns guided onboarding (only appears while no upstream is configured).
-2. Ask the human which MCP server they want to attach, and for its **host / port / path** (e.g. `127.0.0.1:8088/mcp`).
-3. **Offer an integration pack for it** (do this *regardless* of whether they knew the host/port — see Step 2's pack note for why a pack is worth it). Call **`keep_install_pack`** with no arguments to list packs, name any that match their server, and offer to install with `keep_install_pack name='<pack>'`. Packs also carry sensible host/port defaults, which helps if they were unsure.
-4. Ask whether it needs auth (a bearer token). If unsure, add it without one — mcp-keep auto-detects required auth by probing for a `401`.
-5. Confirm the details back to the human, then call **`keep_add_upstream`** with `name` (their label) plus `host` / `port` / `path` (and `bearer_token` / `integration` if relevant). Note: tools fronted by a *newly* added upstream may need one more client reload to surface (the tool list handshakes once per session).
-6. Call **`keep_status`** to confirm it attached and see the cached tool count.
+2. **Offer the upstreams we support, then ask which they want.** Browse the integration registry (`https://api.github.com/repos/exetorius/mcp-keep-integrations/contents/`, entries with `type: "dir"`, skipping dotfolders) to see which servers we have first-class support for (e.g. VibeUE / Unreal), and present those as a menu — *then* ask which one they want to attach, making clear they can also point at **any** MCP server not on the list. Picking a supported server here is just choosing the upstream; it does **not** install that server's pack (that's Phase 3, a separate yes/no).
+3. Get its **host / port / path** (e.g. `127.0.0.1:8088/mcp`). Don't guess these — if they're unsure and they picked a supported server, its pack carries sensible defaults you can surface, but installing the pack is still a later step.
+4. **Ask about auth, and actively recommend a bearer token.** A bearer protects the upstream; treat enabling it as the encouraged path. Ask the human if they want to set one and steer toward "yes" — only go token-less if they explicitly decline. **Never silently default to no auth, and never invent a token yourself.** (mcp-keep also auto-detects required auth by probing for a `401`, so if the upstream needs one you'll find out, but don't use that as a reason to skip the conversation.)
+5. **Do not set `integration` here.** Packs are Phase 3, chosen explicitly. Leave `integration` empty for now.
+6. Confirm the assembled details back to the human (name, host, port, path, whether a bearer is set), then call **`keep_add_upstream`** with `name` (their label) plus `host` / `port` / `path` (and `bearer_token` if they chose one). 
+7. The tools fronted by a newly added upstream may need **one more client reload** to surface (the tool list handshakes once per session) — that's expected and fine. Prompt the human to reload if the fronted tools aren't visible.
+8. Call **`keep_status`** to confirm it attached and see the cached tool count.
 
-That's it. mcp-keep will now keep that server's tools surfaced to you even when it's offline.
+That's it for the upstream. mcp-keep will now keep that server's tools surfaced to you even when it's offline.
+
+---
+
+# Phase 3 — Integration pack (optional, explicit opt-in)
+
+A pack is **not** just a host/port lookup — it ships tool **hints, synthetic tools, and agent instructions** tailored to a specific upstream (e.g. VibeUE / Unreal), which is what makes the fronted tools genuinely usable rather than a raw list. Frame it to the human for what it is: an **optional enhancement** on top of an already-working upstream — never something the upstream needs, and never something you attach on their behalf.
+
+Only after an upstream is attached and working:
+
+1. Call **`keep_install_pack`** with **no arguments** to list the available packs.
+2. If a pack matches the upstream the human attached (e.g. they attached VibeUE and a `vibeue` pack exists), tell them it's available as an **optional enhancement** and offer it as a clear choice with **three paths**:
+   - **explain it** — describe what the pack adds (the hints / synthetic tools / agent instructions, and concretely how it improves working with *their* upstream) so they can decide informed;
+   - **install it** — go ahead; or
+   - **skip it** — the upstream works fine as-is.
+   Lead with the offer to explain, so they're never forced to choose blind.
+3. **Install only on an explicit yes.** On consent, call `keep_install_pack name='<pack>'` to download and install it into `~/.mcp-keep/integrations/<pack>/` and run any post-install steps. This also sets the upstream's `integration` to that pack.
+4. If they decline, leave it — the upstream works fine without a pack. Don't re-ask or auto-install later.
+
+> **Never** pick a pack, set `integration:`, or run `keep_install_pack name=...` without the human first saying yes to that specific pack. Browsing/listing packs is fine; installing one is a privileged effect that needs consent.
 
 ---
 
 ## Reference — config shape (for the rare case you must edit by hand)
 
-Prefer `keep_add_upstream`. Only fall back to editing `~/.mcp-keep/config.json` directly if a tool isn't available. **Never commit this file — it can contain a bearer token.**
+Prefer the `keep_*` tools. Only fall back to editing `~/.mcp-keep/config.json` directly if a tool isn't available (e.g. a pre-launch edit before any client is connected). **Never commit this file — it can contain a bearer token.**
 
 ```json
 {
@@ -120,6 +143,10 @@ Prefer `keep_add_upstream`. Only fall back to editing `~/.mcp-keep/config.json` 
 
 ## Rules
 
-- Show the human every privileged change (config writes, adding a server, wiring the client) before doing it. No silent installs.
+- **Layers, in order:** core relay → (optional) upstream → (optional) pack. Don't run ahead of the human into a later layer.
+- **One decision at a time.** Ask, confirm, then act. Never batch-decide host/port/bearer/pack to save a reload.
+- Show the human every privileged change (config writes, adding a server, installing a pack, wiring the client, Start-with-OS) before doing it. No silent installs.
+- **Never auto-pick a pack** or set `integration:` — packs are an explicit, consented yes/no.
+- **Recommend a bearer token** for any upstream; only go token-less if the human declines. Never invent one or silently skip auth.
 - Don't start a second relay on the listen port if one is already running.
 - mcp-keep is loopback-only by design — don't try to bind it beyond `127.0.0.1`.

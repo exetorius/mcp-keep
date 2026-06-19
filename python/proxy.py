@@ -52,7 +52,7 @@ PACKS_REPO   = "exetorius/mcp-keep-integrations"
 PACKS_BRANCH = "main"
 
 SERVER_NAME = "mcp-keep"
-VERSION     = "1.1.0"
+VERSION     = "1.2.0"
 
 # MCP protocol revision (the spec versions revisions by date, not semver).
 # Pinned to the oldest stable revision for maximum upstream interop; the only
@@ -711,14 +711,30 @@ def handle_management_call(req_id, tool_name: str, args: dict):
         if not STATE.cfg["upstreams"]:
             lines.append("No upstreams configured yet. Call keep_add_upstream to register one "
                          "(or keep_welcome for guided setup).")
+        cfg_bearer = {u["name"]: bool(u.get("bearer_token"))
+                      for u in STATE.cfg["upstreams"]}
+        needs_token = []
         with STATE.lock:
             for name, st in STATE.upstreams.items():
                 tools = st["manifest"].get("tools", [])
                 ident = st["manifest"].get("serverInfo", {}).get("name", "?")
                 state_str = "online" if st["online"] else "OFFLINE (serving cache)"
+                if st["auth_required"] and not cfg_bearer.get(name):
+                    auth_str = "REQUIRED but no bearer set"
+                    needs_token.append(name)
+                elif st["auth_required"]:
+                    auth_str = "required (bearer set)"
+                else:
+                    auth_str = "none"
                 lines.append(f"  • {name}: {state_str}, identity='{ident}', "
-                             f"{len(tools)} cached tools, "
-                             f"auth={'required' if st['auth_required'] else 'none'}")
+                             f"{len(tools)} cached tools, auth={auth_str}")
+        if needs_token:
+            who = ", ".join(needs_token)
+            lines.append(
+                f"\nAuth: {who} rejected the connection with 401 and has no bearer token "
+                "configured — it will stay offline until you set one. Add it via "
+                "keep_add_upstream (re-run with the same name plus bearer_token) or edit "
+                "config.json. A bearer is recommended for any upstream's security.")
         # Self-quieting steer toward start-with-OS (issue #31). Shown only while
         # NOT registered for OS startup — the instant keep_start_with_os flips the
         # flag, this regenerates without the note (state lives in one place, no
