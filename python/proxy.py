@@ -54,7 +54,7 @@ PACKS_REPO   = "exetorius/mcp-keep-integrations"
 PACKS_BRANCH = "main"
 
 SERVER_NAME = "mcp-keep"
-VERSION     = "1.8.0"
+VERSION     = "1.8.1"
 
 # MCP protocol revision (the spec versions revisions by date, not semver).
 # Pinned to the oldest stable revision for maximum upstream interop; the only
@@ -460,12 +460,54 @@ def _post_mcp(url: str, payload: dict, bearer: str, session_id: str = ""):
     req = urllib.request.Request(url, data=data, headers=headers, method="POST")
     try:
         with urllib.request.urlopen(req, timeout=30) as resp:
-            raw = resp.read()
             ctype = resp.headers.get("Content-Type", "")
             sid = resp.headers.get("mcp-session-id", session_id)
-            return resp.status, {"mcp-session-id": sid, "content-type": ctype}, _parse_mcp_body(raw, ctype)
+            if "text/event-stream" in ctype:
+                # #24: read the SSE stream incrementally and stop at the first
+                # complete event. A Streamable-HTTP upstream may hold the stream
+                # open for server-initiated messages, so resp.read() (wait for EOF)
+                # could block until the timeout. _read_sse_first_event returns as
+                # soon as one event's payload parses, then we close the connection.
+                obj = _read_sse_first_event(resp)
+            else:
+                obj = _parse_mcp_body(resp.read(), ctype)
+            return resp.status, {"mcp-session-id": sid, "content-type": ctype}, obj
     except urllib.error.HTTPError as e:
         return e.code, {}, None
+
+# Bound how much of an SSE stream we'll read while hunting the first event, so a
+# misbehaving keep-alive stream can't make us read unboundedly (#24).
+_SSE_READ_CAP = 4 * 1024 * 1024
+
+def _read_sse_first_event(resp):
+    """Return the first SSE event that parses as JSON, reading line-by-line so we
+    never wait for the stream to EOF (#24). Accumulates `data:` fields and parses
+    the joined payload when a blank line completes an event; ignores comments
+    (`: keep-alive`) and other SSE fields."""
+    data_lines: list[str] = []
+    total = 0
+    for raw_line in resp:                      # readline-based: incremental, not EOF
+        total += len(raw_line)
+        if total > _SSE_READ_CAP:
+            break
+        line = raw_line.decode("utf-8", errors="replace").rstrip("\r\n")
+        if line.startswith("data:"):
+            value = line[5:]
+            if value.startswith(" "):
+                value = value[1:]
+            data_lines.append(value)
+        elif line == "":                       # blank line terminates an event
+            if data_lines:
+                try:
+                    return json.loads("\n".join(data_lines))
+                except json.JSONDecodeError:
+                    data_lines = []
+    if data_lines:                             # stream ended mid/after a data block
+        try:
+            return json.loads("\n".join(data_lines))
+        except json.JSONDecodeError:
+            return None
+    return None
 
 def _parse_mcp_body(raw: bytes, content_type: str):
     """Handle both plain JSON and SSE (text/event-stream) responses.
