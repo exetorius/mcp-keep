@@ -32,11 +32,13 @@ This is the whole job until it's done. **Do not ask about upstreams, bearer toke
 Start the relay so it outlives this chat (detached, not a foreground/managed task the client will kill on session end):
 
 ```bash
-cd "path/to/mcp-keep/python" && python proxy.py &
+cd "path/to/mcp-keep/python" && python proxy.py --serve &
 # or a built binary, launched detached:
-#   Windows:      start "" mcp-keep.exe
-#   macOS/Linux:  ./mcp-keep &
+#   Windows:      start "" mcp-keep.exe --serve
+#   macOS/Linux:  ./mcp-keep --serve &
 ```
+
+The **`--serve` flag is required to actually run the relay** (#56). Without it — a bare `mcp-keep` or any unknown arg — the program prints a "your MCP client starts me, nothing to run here" notice and exits *without binding a port*, so a human who runs it by hand never spawns a stray windowless process. The AI launch and start-with-OS registration both pass `--serve`; you must too.
 
 It creates `~/.mcp-keep/`, listens on `http://127.0.0.1:8089/mcp`, and **runs fine with zero upstreams — that's the correct first-run state. Don't add one to "finish."**
 

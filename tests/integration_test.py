@@ -193,7 +193,7 @@ def main() -> int:
     log_path = pathlib.Path(home, "relay.log")
     log_file = open(log_path, "w", encoding="utf-8")
     env = dict(os.environ, MCP_KEEP_HOME=home)
-    relay = subprocess.Popen([sys.executable, str(PROXY)], env=env,
+    relay = subprocess.Popen([sys.executable, str(PROXY), "--serve"], env=env,
                              stdin=subprocess.DEVNULL, stdout=log_file, stderr=subprocess.STDOUT)
 
     # Talk to the relay directly — never via a proxy. Some CI runner images (notably

@@ -23,13 +23,16 @@ The **relay is the product**. It runs perfectly well with **zero upstreams** —
 In the folder this file came in, find the mcp-keep program:
 
 - A standalone binary: `mcp-keep` (macOS/Linux) or `mcp-keep.exe` (Windows), **or**
-- the script `python/proxy.py` (run with `python proxy.py`) if this is a source checkout.
+- the script `python/proxy.py` (run with `python proxy.py --serve`) if this is a source checkout.
 
-**Launch it detached.** This matters: mcp-keep is a long-running server, so if you (the AI) start it as an ordinary foreground command, your client may treat it as a *managed background task* and **kill it the moment this session ends** — the relay won't survive a restart. Start it so it's orphaned from your session instead:
+**Launch it detached, and pass `--serve`.** Two things matter here:
 
-- **Windows:** `start "" mcp-keep.exe`  (or PowerShell: `Start-Process .\mcp-keep.exe`)
-- **macOS / Linux binary:** `./mcp-keep &`  (or `nohup ./mcp-keep >/dev/null 2>&1 &`)
-- **Source checkout:** `python proxy.py &`
+- **`--serve` is required to actually run the relay.** Without it — a bare `mcp-keep` or any unknown argument — the program prints a short "your MCP client starts me, nothing to run here" notice and exits *without binding a port*. This is deliberate: it stops a human who runs the binary by hand from spawning an invisible, windowless relay they can't see or stop. You (the AI) and Start-with-OS both pass `--serve`; you must too.
+- **Detached** matters because mcp-keep is a long-running server: if you start it as an ordinary foreground command, your client may treat it as a *managed background task* and **kill it the moment this session ends** — the relay won't survive a restart. Start it so it's orphaned from your session instead:
+
+- **Windows:** `start "" mcp-keep.exe --serve`  (or PowerShell: `Start-Process .\mcp-keep.exe -ArgumentList '--serve'`)
+- **macOS / Linux binary:** `./mcp-keep --serve &`  (or `nohup ./mcp-keep --serve >/dev/null 2>&1 &`)
+- **Source checkout:** `python proxy.py --serve &`
 
 It will:
 - create its home at `~/.mcp-keep/` (override with the `MCP_KEEP_HOME` env var),

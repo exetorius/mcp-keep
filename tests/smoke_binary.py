@@ -46,7 +46,7 @@ def main() -> int:
 
     # stdin=DEVNULL → is_tty False → relay skips the setup menu / command loop
     # and goes straight to serve_forever (no blocking input()).
-    relay = subprocess.Popen([str(binary)], env=env, stdin=subprocess.DEVNULL,
+    relay = subprocess.Popen([str(binary), "--serve"], env=env, stdin=subprocess.DEVNULL,
                              stdout=log_file, stderr=subprocess.STDOUT)
 
     def dump_log(msg):

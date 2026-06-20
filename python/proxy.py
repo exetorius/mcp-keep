@@ -53,7 +53,7 @@ PACKS_REPO   = "exetorius/mcp-keep-integrations"
 PACKS_BRANCH = "main"
 
 SERVER_NAME = "mcp-keep"
-VERSION     = "1.4.0"
+VERSION     = "1.5.0"
 
 # MCP protocol revision (the spec versions revisions by date, not semver).
 # Pinned to the oldest stable revision for maximum upstream interop; the only
@@ -665,8 +665,8 @@ def error_result(req_id, text: str) -> dict:
 # Tools mcp-keep answers itself (never forwarded to an upstream). The tools/call
 # dispatcher routes any name in this set to handle_management_call().
 MANAGEMENT_TOOL_NAMES = {
-    "keep_status", "keep_install_pack", "keep_add_upstream", "keep_welcome",
-    "keep_start_with_os", "keep_disable_start_with_os", "keep_reload",
+    "keep_status", "keep_install_pack", "keep_add_upstream", "keep_remove_upstream",
+    "keep_welcome", "keep_start_with_os", "keep_disable_start_with_os", "keep_reload",
 }
 
 def management_tools(state: "State") -> list[dict]:
@@ -719,6 +719,25 @@ def management_tools(state: "State") -> list[dict]:
             "required": ["name"],
         },
     })
+
+    # Removal counterpart to keep_add_upstream (#36) — surfaced only while there
+    # is at least one upstream to remove, so it never clutters a zero-upstream core.
+    if state.cfg["upstreams"]:
+        tools.append({
+            "name": "keep_remove_upstream",
+            "description": ("Remove an upstream MCP server from mcp-keep by its label. Drops it from "
+                            "config and stops fronting its tools. Confirm with the user before calling "
+                            "— this writes config and removes a network upstream. The on-disk tool "
+                            "cache is left in place, so re-adding the same name restores it instantly."),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string",
+                             "description": "The label of the upstream to remove (as shown in keep_status)."},
+                },
+                "required": ["name"],
+            },
+        })
 
     # Apply a hand-edited config.json without a restart. The capture loop also
     # hot-reloads on file change within one interval; this is the explicit, instant
@@ -829,13 +848,36 @@ def handle_management_call(req_id, tool_name: str, args: dict):
         return ok(f"Added upstream '{name}' -> {upstream_url(new_u)}{extra}. "
                   "Capturing its tools now — call keep_status in a moment to confirm.")
 
+    if tool_name == "keep_remove_upstream":
+        a = args or {}
+        name = str(a.get("name") or "").strip()
+        if not name:
+            return error_result(req_id,
+                "keep_remove_upstream needs a 'name' — the label of the upstream to remove "
+                "(as shown in keep_status).")
+        # Reload fresh from disk so we don't clobber a concurrent change.
+        cfg = load_config()
+        before = len(cfg["upstreams"])
+        cfg["upstreams"] = [u for u in cfg["upstreams"] if u.get("name") != name]
+        if len(cfg["upstreams"]) == before:
+            existing = ", ".join(u.get("name", "?") for u in cfg["upstreams"]) or "(none)"
+            return error_result(req_id,
+                f"No upstream named '{name}' to remove. Configured upstreams: {existing}.")
+        save_config(cfg)
+        STATE.cfg = cfg
+        STATE.rebuild_from_cache()
+        _sync_config_mtime()   # our own write — don't let the hot-reload re-fire on it
+        return ok(f"Removed upstream '{name}'. {len(cfg['upstreams'])} upstream(s) remain. "
+                  "Its tool cache is kept, so re-adding the same name restores it instantly. "
+                  "Call keep_status to confirm.")
+
     if tool_name == "keep_reload":
         n = reload_config("keep_reload tool")
         return ok(f"Reloaded config + integration packs — {n} upstream(s) configured. "
                   "Call keep_status to see each upstream's current health and cached tool count.")
 
     if tool_name == "keep_status":
-        lines = [f"mcp-keep — listening on 127.0.0.1:{STATE.cfg['listen_port']}"]
+        lines = [f"mcp-keep {VERSION} — listening on 127.0.0.1:{STATE.cfg['listen_port']}"]
         if not STATE.cfg["upstreams"]:
             lines.append("No upstreams configured yet. Call keep_add_upstream to register one "
                          "(or keep_welcome for guided setup).")
@@ -1216,8 +1258,8 @@ def _launch_args() -> list[str]:
     interpreter against proxy.py.
     """
     if getattr(sys, "frozen", False):
-        return [sys.executable]
-    return [sys.executable, str(pathlib.Path(__file__).resolve())]
+        return [sys.executable, "--serve"]
+    return [sys.executable, str(pathlib.Path(__file__).resolve()), "--serve"]
 
 def _launch_command() -> str:
     return " ".join(f'"{a}"' for a in _launch_args())
@@ -1479,9 +1521,35 @@ def main():
     except KeyboardInterrupt:
         log("keep stopped.")
 
+_USAGE = (
+    f"mcp-keep {VERSION}\n"
+    "\n"
+    "mcp-keep is an AI-driven MCP lifecycle relay - your MCP client (e.g. Claude\n"
+    "Code) starts and drives it for you. There's nothing to run by hand here.\n"
+    "Open the mcp-keep project in your client and ask it to set up mcp-keep, then\n"
+    "manage everything through the keep_* tools (keep_status, keep_add_upstream, ...).\n"
+    "\n"
+    "  --serve        run the relay (used by your client / start-with-OS; not for humans)\n"
+    "  --wait-ready   poll an already-running relay until ready (exit 0=up, 1=timeout)\n"
+    "  --version, -v  print version and exit\n"
+)
+
 if __name__ == "__main__":
-    if "--wait-ready" in sys.argv[1:]:
+    _args = sys.argv[1:]
+    if "--wait-ready" in _args:
         # Readiness probe for launchers (#39): exit 0 once the relay answers,
         # 1 on timeout. Does NOT start a relay — only polls an existing one.
         sys.exit(0 if wait_ready() else 1)
-    main()
+    if "--version" in _args or "-v" in _args:
+        print(f"mcp-keep {VERSION}")
+        sys.exit(0)
+    if "--serve" in _args:
+        # The only path that binds a port. Used by the MCP client launch and by
+        # start-with-OS registration (_launch_args appends --serve).
+        main()
+    else:
+        # #56: bare/unknown invocation (a human at a terminal) must NOT silently
+        # spawn a relay — that orphans a windowless process they can't see. Push
+        # them back to the AI-driven flow and exit cleanly without binding.
+        print(_USAGE, file=sys.stderr)
+        sys.exit(0)

@@ -23,13 +23,15 @@ Python 3.10+ — **standard library only, no dependencies.**
 ```bash
 git clone https://github.com/exetorius/mcp-keep
 cd mcp-keep/python
-python proxy.py
+python proxy.py --serve
 ```
+
+> `--serve` is required to actually run the relay (#56). A bare `python proxy.py` (or any unknown arg) prints a "your MCP client starts me" notice and exits without binding a port — by design, so a stray invocation never spawns a hidden relay.
 
 Use an isolated home while developing so you never touch a real config:
 
 ```bash
-MCP_KEEP_HOME=/tmp/keep-dev python proxy.py
+MCP_KEEP_HOME=/tmp/keep-dev python proxy.py --serve
 ```
 
 ## Tests

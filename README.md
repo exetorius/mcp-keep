@@ -62,9 +62,9 @@ Grab the build for your OS from the [latest release](https://github.com/exetoriu
 | macOS (Apple Silicon) | [`mcp-keep-macos-arm64.zip`](https://github.com/exetorius/mcp-keep/releases/latest/download/mcp-keep-macos-arm64.zip) |
 | Linux (x86-64) | [`mcp-keep-linux-x86_64.zip`](https://github.com/exetorius/mcp-keep/releases/latest/download/mcp-keep-linux-x86_64.zip) |
 
-Unzip it — you'll get a `mcp-keep/` folder holding the `mcp-keep` binary, its `_internal/` runtime, and `FIRST_TIME_SETUP.md`. Run the binary from inside that folder. On macOS/Linux, mark it executable first (`chmod +x mcp-keep/mcp-keep`); on Windows, just run `mcp-keep.exe`.
+Unzip it — you'll get a `mcp-keep/` folder holding the `mcp-keep` binary, its `_internal/` runtime, and `FIRST_TIME_SETUP.md`. On macOS/Linux, mark it executable first (`chmod +x mcp-keep/mcp-keep`). You don't launch the binary by hand: it only runs the relay when started with `--serve`, and running it bare just prints a short "your MCP client starts me, nothing to run here" notice and exits — that's deliberate, so a stray double-click never spawns an invisible relay.
 
-`mcp-keep` is **AI-driven — it does nothing on its own**; an MCP client connects and drives it. The fastest path: run the binary, then tell your assistant *"read FIRST_TIME_SETUP.md and set up keep for me"* (that file ships alongside the binary). It will wire up the client pointer and walk you through attaching your first upstream.
+`mcp-keep` is **AI-driven — it does nothing on its own**; an MCP client connects, launches it (with `--serve`), and drives it. The fastest path: just tell your assistant *"read FIRST_TIME_SETUP.md and set up keep for me"* (that file ships alongside the binary). It will start the relay, wire up the client pointer, and walk you through attaching your first upstream.
 
 > First run creates the home dir at `~/.mcp-keep/` and offers to start `mcp-keep` with your OS. Point your MCP client at `http://127.0.0.1:8089/mcp` (see [Claude Code setup](#claude-code-setup)).
 
@@ -75,7 +75,7 @@ Python 3.10+, standard library only — no dependencies. See [CONTRIBUTING.md](C
 ```bash
 git clone https://github.com/exetorius/mcp-keep
 cd mcp-keep/python
-python proxy.py
+python proxy.py --serve
 ```
 
 ## Where things live
