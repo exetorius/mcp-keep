@@ -129,6 +129,7 @@ A hand-edit to `~/.mcp-keep/config.json` on a *running* relay is picked up autom
 | `capture_interval_seconds` | Fast re-attach poll cadence while an upstream is **down** (default 30) |
 | `online_heartbeat_seconds` | Cheap liveness-check cadence while an upstream is **online** — no `tools/list` pull (default 300, #40) |
 | `pack_update_check_seconds` | How often the relay refreshes each installed pack's latest version for `keep_status` update detection (default 21600 = 6h, #65). `keep_status check_updates=true` forces a live re-check. |
+| `tool_call_timeout_seconds` | Max wait for an upstream `tools/call` before failing fast with a clear error; a stall is not retried (default 120, #9). |
 | `upstreams[].name` | User's local label — cache key, routing, status |
 | `upstreams[].host` / `.port` / `.path` | Where the upstream MCP server lives |
 | `upstreams[].bearer_token` | Optional, injected as `Authorization: Bearer` for that upstream only |
