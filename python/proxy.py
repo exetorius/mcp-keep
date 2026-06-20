@@ -29,6 +29,7 @@ import json
 import os
 import pathlib
 import platform
+import queue
 import shutil
 import subprocess
 import sys
@@ -54,7 +55,7 @@ PACKS_REPO   = "exetorius/mcp-keep-integrations"
 PACKS_BRANCH = "main"
 
 SERVER_NAME = "mcp-keep"
-VERSION     = "1.8.1"
+VERSION     = "1.9.0"
 
 # MCP protocol revision (the spec versions revisions by date, not semver).
 # Pinned to the oldest stable revision for maximum upstream interop; the only
@@ -375,6 +376,10 @@ class State:
         self.routing:   dict[str, str]  = {}   # tool name -> upstream name
         # #65 pack-update detection: {pack_name: {"latest": str|None, "checked_at": ts}}
         self.pack_latest: dict[str, dict] = {}
+        # #6 live tool-list refresh: open SSE client streams (each a Queue we push
+        # notifications into) + a signature of the last-broadcast aggregate surface.
+        self.listeners: set = set()
+        self.tools_sig: str = ""
         self.rebuild_from_cache()
 
     def rebuild_from_cache(self):
@@ -439,6 +444,39 @@ class State:
             return self.upstreams.get(name, {}).get("config")
 
 STATE: "State" = None  # set in main / on demand
+
+# Management tools whose effect changes the aggregate tool surface — used to push
+# a live refresh immediately after they run (#6), instead of waiting for the loop.
+_MUTATING_TOOLS = {"keep_add_upstream", "keep_remove_upstream",
+                   "keep_install_pack", "keep_remove_pack", "keep_reload"}
+
+def maybe_notify_tools_changed():
+    """Push notifications/tools/list_changed to open SSE clients when the aggregate
+    tool surface actually changed since the last broadcast (#6). The relay already
+    advertises capabilities.tools.listChanged; this is what delivers it, so a client
+    refreshes its tool list live instead of needing a /mcp reconnect. Cheap, idempotent
+    signature compare — safe to call liberally. Must NOT be called while holding
+    STATE.lock (aggregate_tools acquires it)."""
+    if STATE is None:
+        return
+    try:
+        names = sorted(t.get("name", "") for t in STATE.aggregate_tools())
+    except Exception:
+        return
+    sig = hashlib.sha256("\n".join(names).encode()).hexdigest()
+    with STATE.lock:
+        if sig == STATE.tools_sig:
+            return
+        STATE.tools_sig = sig
+        listeners = list(STATE.listeners)
+    frame = ("event: message\ndata: "
+             + json.dumps({"jsonrpc": "2.0", "method": "notifications/tools/list_changed"})
+             + "\n\n").encode()
+    for q in listeners:
+        try:
+            q.put_nowait(frame)
+        except Exception:
+            pass
 
 # ---------------------------------------------------------------------------
 # Upstream capture — initialize handshake + tools/list, learn identity.
@@ -722,7 +760,8 @@ def capture_loop():
             else:
                 # Down or never captured this session: poll hard to (re)attach.
                 _safe_capture(u)
-        check_pack_updates()   # #65: self-throttled pack-version refresh
+        check_pack_updates()           # #65: self-throttled pack-version refresh
+        maybe_notify_tools_changed()   # #6: push a refresh if the surface changed this tick
         time.sleep(max(5, int(STATE.cfg.get("capture_interval_seconds", 30))))
 
 # ---------------------------------------------------------------------------
@@ -787,7 +826,8 @@ def management_tools(state: "State") -> list[dict]:
     # First-run onboarding — state-gated: surfaced ONLY while no upstream is
     # configured, and drops off the tool list once one is added. This is how a
     # bare binary onboards itself over MCP with no repo / CLAUDE.md present.
-    # (Vanishing takes effect on the client's next tools/list fetch — see issue #6.)
+    # (Vanishing/appearing is pushed live via notifications/tools/list_changed to
+    # any open SSE client — #6 — so a compliant client re-fetches without a reload.)
     if not state.cfg["upstreams"]:
         tools.append({
             "name": "keep_welcome",
@@ -1375,19 +1415,29 @@ class KeepHandler(BaseHTTPRequestHandler):
             return
         if "text/event-stream" not in self.headers.get("Accept", ""):
             self._text(200, "mcp-keep running"); return
-        # SSE heartbeat — keeps the client from reconnecting in a tight loop
+        # SSE stream: register as a listener so we can push tools/list_changed (#6),
+        # with a heartbeat on idle to keep the client from reconnecting in a tight loop.
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-cache")
         self.send_header("Connection", "keep-alive")
         self.end_headers()
+        q: queue.Queue = queue.Queue()
+        with STATE.lock:
+            STATE.listeners.add(q)
         try:
             while True:
-                self.wfile.write(b": heartbeat\n\n")
+                try:
+                    frame = q.get(timeout=15)        # pushed notification
+                except queue.Empty:
+                    frame = b": heartbeat\n\n"        # idle keep-alive
+                self.wfile.write(frame)
                 self.wfile.flush()
-                time.sleep(15)
         except (BrokenPipeError, ConnectionResetError, OSError):
             pass
+        finally:
+            with STATE.lock:
+                STATE.listeners.discard(q)
 
     def do_POST(self):
         if not self._gate():
@@ -1439,6 +1489,10 @@ class KeepHandler(BaseHTTPRequestHandler):
                 args = (rpc.get("params") or {}).get("arguments", {})
                 self._raw(handle_management_call(req_id, tool_name, args))
                 log(f"{tool_name} -> handled by keep")
+                if tool_name in _MUTATING_TOOLS:
+                    # #6: a config-mutating tool changed the surface — push a live
+                    # refresh now rather than waiting for the next capture tick.
+                    maybe_notify_tools_changed()
                 return
             u = STATE.upstream_for_tool(tool_name)
             if u is None:

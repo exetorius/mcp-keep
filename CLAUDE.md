@@ -144,7 +144,7 @@ MCP client (Claude Code) → mcp-keep :8089 → upstream MCP server(s)
 ```
 
 - `initialize` — answered by the relay, never forwarded. Protocol version echoed exactly.
-- `tools/list` — aggregated from every upstream's on-disk cache + pack hints/synthetic tools + management tools (`keep_status`, `keep_install_pack`). Upstreams can all be offline.
+- `tools/list` — aggregated from every upstream's on-disk cache + pack hints/synthetic tools + management tools (`keep_status`, `keep_install_pack`). Upstreams can all be offline. When the aggregate surface changes (capture, install/remove, attach), the relay pushes `notifications/tools/list_changed` to any open SSE client so a compliant client re-fetches live, no reload (#6).
 - Capture loop — inverted cadence (#40): a **down** upstream is polled fast with a full handshake (`initialize` + `tools/list`, 401 auth probe) to re-attach; an **online** one stays quiet — only a cheap TCP liveness check on a slow heartbeat, never a `tools/list` pull. A failed `tools/call` lazily marks an upstream down. The cache (with a tool-list hash + last-verified time, shown in `keep_status`) is the source of truth while healthy.
 - `tools/call` — routed to the owning upstream by tool name, bearer injected per-upstream. Clear error if down.
 - Security gates — always-on: loopback `Host` only, browser `Origin` must be allowlisted, body size cap. DNS-rebinding defence; not loosenable without explicit opt-in.
