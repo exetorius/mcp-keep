@@ -148,6 +148,7 @@ CONFIG_DEFAULTS = {
     "capture_interval_seconds": 30,       # fast poll cadence while an upstream is DOWN (re-attach)
     "online_heartbeat_seconds": 300,      # cheap liveness check cadence while ONLINE (#40); no tools/list pull
     "pack_update_check_seconds": 21600,   # how often to refresh each installed pack's latest version (#65); 6h
+    "tool_call_timeout_seconds": 120,     # max wait for an upstream tools/call before failing fast (#9)
     "upstreams":       [],
     "startup_asked":      False,
     "startup_registered": False,
@@ -782,17 +783,40 @@ def forward_call(u: dict, body_bytes: bytes, client_headers: dict) -> tuple[bool
         if k in client_headers:
             fwd[k] = client_headers[k]
 
+    # #9: bound a hung upstream. A stall/timeout means it's accepting but not
+    # answering — fail fast and do NOT retry (the old range(2) retry doubled a
+    # 120s stall into ~240s). Only a genuine connection error gets one retry.
+    timeout = max(5, int(STATE.cfg.get("tool_call_timeout_seconds",
+                                       CONFIG_DEFAULTS["tool_call_timeout_seconds"])))
     last = None
     for attempt in range(2):
         try:
             req = urllib.request.Request(url, data=body_bytes, headers=fwd, method="POST")
-            with urllib.request.urlopen(req, timeout=120) as resp:
-                return True, resp.headers.get("Content-Type", ""), resp.read()
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                ctype = resp.headers.get("Content-Type", "")
+                if "text/event-stream" in ctype:
+                    # #9/#24: read the SSE response incrementally and stop at the
+                    # first event — don't block on a keep-alive stream's resp.read().
+                    obj = _read_sse_first_event(resp)
+                    if obj is not None:
+                        return True, "application/json", json.dumps(obj).encode()
+                    return True, ctype, b""
+                return True, ctype, resp.read()
         except urllib.error.HTTPError as e:
             body = e.read()
             log(f"upstream '{u['name']}' HTTP {e.code}: {body[:200]}")
             return False, e.headers.get("Content-Type", ""), body
-        except (urllib.error.URLError, socket.timeout, OSError) as exc:
+        except (socket.timeout, TimeoutError):
+            log(f"'{u['name']}' stalled — no response within {timeout}s; not retrying (#9)")
+            return False, "", b""
+        except urllib.error.URLError as exc:
+            if isinstance(getattr(exc, "reason", None), (socket.timeout, TimeoutError)):
+                log(f"'{u['name']}' stalled — connect timed out after {timeout}s; not retrying (#9)")
+                return False, "", b""
+            last = exc
+            if attempt == 0:
+                log(f"'{u['name']}' connection error, retrying: {exc}")
+        except OSError as exc:
             last = exc
             if attempt == 0:
                 log(f"'{u['name']}' connection error, retrying: {exc}")
