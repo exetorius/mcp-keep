@@ -54,7 +54,7 @@ PACKS_REPO   = "exetorius/mcp-keep-integrations"
 PACKS_BRANCH = "main"
 
 SERVER_NAME = "mcp-keep"
-VERSION     = "1.6.0"
+VERSION     = "1.6.1"
 
 # MCP protocol revision (the spec versions revisions by date, not semver).
 # Pinned to the oldest stable revision for maximum upstream interop; the only
@@ -218,9 +218,19 @@ def upstream_url(u: dict) -> str:
 # Integration packs — per upstream: hints, synthetic tools, instructions
 # ---------------------------------------------------------------------------
 
+# A pack is "installed" only if it has real content files. We can't use mere
+# directory existence (#61): an upstream's capture cache lives at
+# integrations/<name>/.cache/, so when the upstream name equals the pack name
+# (the normal case, e.g. vibeue) capturing the upstream creates the directory
+# even though no pack is installed — which would falsely read as present.
+_PACK_FILES = ("hints.json", "synthetic_tools.json", "instructions.md")
+
 def pack_installed(name: str) -> bool:
-    """True if an integration pack named `name` is present on disk (#58)."""
-    return bool(name) and (INTEGRATIONS_DIR / name).exists()
+    """True if an integration pack named `name` has content files on disk (#61)."""
+    if not name:
+        return False
+    base = INTEGRATIONS_DIR / name
+    return any((base / f).exists() for f in _PACK_FILES)
 
 def load_pack(name: str) -> dict:
     """Load a pack's hints / synthetic tools / instructions. Safe if missing."""
@@ -228,9 +238,10 @@ def load_pack(name: str) -> dict:
     if not name:
         return pack
     base = INTEGRATIONS_DIR / name
-    if not base.exists():
-        # #58: an upstream references a pack that isn't installed. Don't swallow
-        # it silently — log so it's diagnosable; keep_status surfaces it too.
+    if not pack_installed(name):
+        # #58/#61: an upstream references a pack that isn't installed (no content
+        # files — a bare .cache dir doesn't count). Don't swallow it silently —
+        # log so it's diagnosable; keep_status surfaces it too.
         log(f"integration '{name}' is set but the pack is not installed "
             f"({base}) — run keep_install_pack name='{name}' to install it.")
         return pack
@@ -786,10 +797,11 @@ def management_tools(state: "State") -> list[dict]:
         })
 
     # Removal counterpart to keep_install_pack (#59) — surfaced only when there's
-    # a pack to remove: one installed on disk, or an upstream still referencing one
-    # (so it can also clear a dangling integration that points at a missing pack).
+    # a pack to remove: a real pack installed on disk (content files, not a bare
+    # .cache dir — #61), or an upstream still referencing one (so it can also clear
+    # a dangling integration that points at a missing pack).
     _installed = [p.name for p in INTEGRATIONS_DIR.iterdir()
-                  if p.is_dir() and not p.name.startswith(".")] if INTEGRATIONS_DIR.exists() else []
+                  if p.is_dir() and pack_installed(p.name)] if INTEGRATIONS_DIR.exists() else []
     if _installed or any(u.get("integration") for u in state.cfg["upstreams"]):
         tools.append({
             "name": "keep_remove_pack",
