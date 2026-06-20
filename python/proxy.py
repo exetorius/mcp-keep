@@ -54,7 +54,7 @@ PACKS_REPO   = "exetorius/mcp-keep-integrations"
 PACKS_BRANCH = "main"
 
 SERVER_NAME = "mcp-keep"
-VERSION     = "1.6.1"
+VERSION     = "1.6.2"
 
 # MCP protocol revision (the spec versions revisions by date, not semver).
 # Pinned to the oldest stable revision for maximum upstream interop; the only
@@ -1105,7 +1105,14 @@ def download_pack(name: str) -> tuple[bool, str]:
         return False, str(e)
 
 def run_post_install(pack_path: pathlib.Path) -> str:
-    """Process post_install.json non-interactively (mcp_server merge into .mcp.json)."""
+    """Describe a pack's post_install.json mcp_server steps WITHOUT applying them.
+
+    A pack may suggest a companion MCP server. We deliberately do NOT write it to
+    the client's config: adding an MCP server (often outward-facing) is a privileged
+    effect that must be shown and consented per-step, not done silently as a side
+    effect of a pack install. So we return a proposal for the assistant to surface;
+    the user adds it only on an explicit, separate yes.
+    """
     path = pack_path / "post_install.json"
     if not path.exists():
         return ""
@@ -1116,25 +1123,24 @@ def run_post_install(pack_path: pathlib.Path) -> str:
     results = []
     for step in steps:
         if step.get("type") == "mcp_server":
-            results.append(_merge_mcp_server(step))
+            results.append(_describe_companion_server(step))
     return "\n".join(r for r in results if r)
 
-def _merge_mcp_server(step: dict) -> str:
+def _describe_companion_server(step: dict) -> str:
+    """Surface (do not apply) a suggested companion MCP server from a pack."""
     server_name   = step["server_name"]
     server_config = step["server_config"]
     target = pathlib.Path(step.get("target", "~/.claude/.mcp.json")).expanduser()
-    try:
-        existing = json.loads(target.read_text(encoding="utf-8")) if target.exists() else {}
-        existing.setdefault("servers", {})
-        if server_name in existing["servers"]:
-            return f"'{server_name}' already configured in {target}."
-        existing["servers"][server_name] = server_config
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(json.dumps(existing, indent=2), encoding="utf-8")
-        return f"Added '{server_name}' to {target}. Restart Claude Code to pick it up."
-    except Exception as e:
-        snippet = json.dumps({server_name: server_config}, indent=2)
-        return (f"Could not write to {target}: {e}\nAdd this manually under \"servers\":\n{snippet}")
+    # NOTE: client reads "mcpServers" (not "servers"). Snippet uses the correct key.
+    snippet = json.dumps({"mcpServers": {server_name: server_config}}, indent=2)
+    url = server_config.get("url") or server_config.get("command") or "(see config)"
+    return (
+        f"This pack suggests an OPTIONAL companion MCP server, '{server_name}' "
+        f"({url}). It was NOT added — adding an MCP server (this one is outward-facing) "
+        "is a separate privileged step. Show the user what it is and add it ONLY on an "
+        f"explicit yes, by merging this into {target} (create the file if absent):\n"
+        f"{snippet}\nThen the client must reload (/mcp) or restart to pick it up. "
+        "If they decline, the pack works fine without it.")
 
 # ---------------------------------------------------------------------------
 # Security gates — always-on, zero-config (bricks 14, 15, 16)
