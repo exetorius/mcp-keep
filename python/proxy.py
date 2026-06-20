@@ -54,7 +54,7 @@ PACKS_REPO   = "exetorius/mcp-keep-integrations"
 PACKS_BRANCH = "main"
 
 SERVER_NAME = "mcp-keep"
-VERSION     = "1.6.2"
+VERSION     = "1.7.0"
 
 # MCP protocol revision (the spec versions revisions by date, not semver).
 # Pinned to the oldest stable revision for maximum upstream interop; the only
@@ -146,6 +146,7 @@ CONFIG_DEFAULTS = {
     "allowed_origins": [],                # browser Origins allowed (brick 14); empty by default
     "capture_interval_seconds": 30,       # fast poll cadence while an upstream is DOWN (re-attach)
     "online_heartbeat_seconds": 300,      # cheap liveness check cadence while ONLINE (#40); no tools/list pull
+    "pack_update_check_seconds": 21600,   # how often to refresh each installed pack's latest version (#65); 6h
     "upstreams":       [],
     "startup_asked":      False,
     "startup_registered": False,
@@ -231,6 +232,23 @@ def pack_installed(name: str) -> bool:
         return False
     base = INTEGRATIONS_DIR / name
     return any((base / f).exists() for f in _PACK_FILES)
+
+def pack_version(name: str) -> str | None:
+    """Installed pack version from its pack.json, or None if unversioned/missing (#65)."""
+    try:
+        p = INTEGRATIONS_DIR / name / "pack.json"
+        if p.exists():
+            return str(json.loads(p.read_text(encoding="utf-8")).get("version") or "").strip() or None
+    except Exception:
+        pass
+    return None
+
+def remote_pack_version(name: str) -> str | None:
+    """Latest pack version from the integrations repo's pack.json on `main` (#65)."""
+    try:
+        return str(json.loads(_gh_raw(f"{name}/pack.json")).get("version") or "").strip() or None
+    except Exception:
+        return None
 
 def load_pack(name: str) -> dict:
     """Load a pack's hints / synthetic tools / instructions. Safe if missing."""
@@ -355,6 +373,8 @@ class State:
         # per-upstream: {"manifest": {...}, "pack": {...}, "online": bool, "auth_required": bool}
         self.upstreams: dict[str, dict] = {}
         self.routing:   dict[str, str]  = {}   # tool name -> upstream name
+        # #65 pack-update detection: {pack_name: {"latest": str|None, "checked_at": ts}}
+        self.pack_latest: dict[str, dict] = {}
         self.rebuild_from_cache()
 
     def rebuild_from_cache(self):
@@ -601,6 +621,29 @@ def _safe_capture(u: dict):
     except Exception as e:
         log(f"capture error for '{u['name']}': {e}")
 
+def check_pack_updates(force: bool = False):
+    """Refresh the cached 'latest version' for installed packs referenced by an
+    upstream (#65). Network-light: one raw pack.json GET per due pack, self-
+    throttled to pack_update_check_seconds unless force=True. Cached in
+    STATE.pack_latest so keep_status reads it instantly with no per-call network."""
+    interval = max(60, int(STATE.cfg.get("pack_update_check_seconds", 21600)))
+    now = time.time()
+    packs = {u.get("integration") for u in STATE.cfg["upstreams"]
+             if pack_installed(u.get("integration"))}
+    for pack in packs:
+        cur = STATE.pack_latest.get(pack)
+        if not force and cur and (now - cur.get("checked_at", 0.0) < interval):
+            continue
+        latest = remote_pack_version(pack)   # network — outside the lock
+        with STATE.lock:
+            prev = STATE.pack_latest.get(pack, {})
+            STATE.pack_latest[pack] = {
+                # keep the last known version if this fetch failed, but still
+                # record checked_at so we don't retry harder than the interval.
+                "latest": latest if latest is not None else prev.get("latest"),
+                "checked_at": now,
+            }
+
 def capture_loop():
     """Background re-attach with an INVERTED cadence (#40):
 
@@ -637,6 +680,7 @@ def capture_loop():
             else:
                 # Down or never captured this session: poll hard to (re)attach.
                 _safe_capture(u)
+        check_pack_updates()   # #65: self-throttled pack-version refresh
         time.sleep(max(5, int(STATE.cfg.get("capture_interval_seconds", 30))))
 
 # ---------------------------------------------------------------------------
@@ -714,8 +758,16 @@ def management_tools(state: "State") -> list[dict]:
     tools.append({
         "name": "keep_status",
         "description": ("Show mcp-keep status: configured upstreams, whether each is "
-                        "currently reachable, and how many tools are cached for each."),
-        "inputSchema": {"type": "object", "properties": {}, "required": []},
+                        "currently reachable, how many tools are cached for each, and "
+                        "whether any installed integration pack has an update available. "
+                        "Pass check_updates=true to force a live re-check of pack versions "
+                        "now instead of using the cached result."),
+        "inputSchema": {
+            "type": "object",
+            "properties": {"check_updates": {"type": "boolean",
+                           "description": "Force a live check of each installed pack's latest version (default: use cached)."}},
+            "required": [],
+        },
     })
 
     # Always available: register a new upstream MCP server over the protocol —
@@ -962,6 +1014,10 @@ def handle_management_call(req_id, tool_name: str, args: dict):
                   "Call keep_status to see each upstream's current health and cached tool count.")
 
     if tool_name == "keep_status":
+        if (args or {}).get("check_updates"):
+            # Explicit live re-check (#65): the user's escape hatch from a stale
+            # cache — fetch each installed pack's latest version right now.
+            check_pack_updates(force=True)
         lines = [f"mcp-keep {VERSION} — listening on 127.0.0.1:{STATE.cfg['listen_port']}"]
         if not STATE.cfg["upstreams"]:
             lines.append("No upstreams configured yet. Call keep_add_upstream to register one "
@@ -1003,6 +1059,30 @@ def handle_management_call(req_id, tool_name: str, args: dict):
                     "pack is not installed in ~/.mcp-keep/integrations/ — its hints and "
                     f"synthetic tools won't load. Run keep_install_pack name='{pk}' to install "
                     f"it, or keep_remove_pack name='{pk}' to detach it.")
+        # #65: pack update detection — installed version vs the cached latest from
+        # the integrations repo (refreshed in the background every
+        # pack_update_check_seconds; pass check_updates=true to force a live check).
+        seen_packs = set()
+        for u in STATE.cfg["upstreams"]:
+            pk = u.get("integration")
+            if not pk or pk in seen_packs or not pack_installed(pk):
+                continue
+            seen_packs.add(pk)
+            installed = pack_version(pk)
+            info = STATE.pack_latest.get(pk) or {}
+            latest = info.get("latest")
+            age = _ago(info["checked_at"]) if info.get("checked_at") else None
+            if latest and latest != installed:
+                lines.append(
+                    f"\nPack update available: '{pk}' {installed or 'unversioned'} → {latest} "
+                    f"(latest checked {age}). Run keep_install_pack name='{pk}' to update; "
+                    "or keep_status check_updates=true to re-check now.")
+            elif latest:
+                lines.append(f"\nPack '{pk}': up to date ({installed}, latest checked {age}).")
+            elif age is None:
+                lines.append(
+                    f"\nPack '{pk}': installed {installed or 'unversioned'}; latest not checked "
+                    "yet — keep_status check_updates=true to check now.")
         # Self-quieting steer toward start-with-OS (issue #31). Shown only while
         # NOT registered for OS startup — the instant keep_start_with_os flips the
         # flag, this regenerates without the note (state lives in one place, no
@@ -1094,13 +1174,29 @@ def download_pack(name: str) -> tuple[bool, str]:
     dest.mkdir(parents=True, exist_ok=True)
     try:
         files = _gh_api(name)
-        got = []
+        got, remote_names = [], set()
         for f in files:
             if f["type"] != "file":
                 continue
             (dest / f["name"]).write_text(_gh_raw(f"{name}/{f['name']}"), encoding="utf-8")
-            got.append(f["name"])
-        return True, f"Downloaded pack '{name}' ({len(got)} files): {', '.join(got)}"
+            remote_names.add(f["name"]); got.append(f["name"])
+        # #65: prune local pack files no longer in the remote pack, so deletions
+        # propagate on update. Only top-level files; never the .cache/ dir or
+        # dotfiles (the upstream capture cache lives at <pack>/.cache/).
+        pruned = []
+        for child in dest.iterdir():
+            if child.is_file() and not child.name.startswith(".") and child.name not in remote_names:
+                child.unlink(); pruned.append(child.name)
+        # We just synced to latest — record it so keep_status reflects it at once.
+        with STATE.lock:
+            STATE.pack_latest[name] = {"latest": pack_version(name), "checked_at": time.time()}
+        msg = f"Downloaded pack '{name}' ({len(got)} files): {', '.join(got)}"
+        if pruned:
+            msg += f"; pruned {len(pruned)} stale: {', '.join(pruned)}"
+        ver = pack_version(name)
+        if ver:
+            msg += f". Version {ver}."
+        return True, msg
     except Exception as e:
         return False, str(e)
 
