@@ -46,7 +46,13 @@ from datetime import datetime, timezone
 # Paths — single global home, outside any project
 # ---------------------------------------------------------------------------
 
-KEEP_HOME        = pathlib.Path(os.environ.get("MCP_KEEP_HOME", pathlib.Path.home() / ".mcp-keep"))
+# #22 dev mode: `--dev` (or MCP_KEEP_DEV=1) isolates a dev relay from a running
+# prod one — its own home (~/.mcp-keep-dev) AND its own default port (8090) — so
+# the two never fight over ~/.mcp-keep or :8089. An explicit MCP_KEEP_HOME still wins.
+DEV_MODE = ("--dev" in sys.argv[1:]) or os.environ.get("MCP_KEEP_DEV", "") not in ("", "0")
+_DEFAULT_HOME = pathlib.Path.home() / (".mcp-keep-dev" if DEV_MODE else ".mcp-keep")
+
+KEEP_HOME        = pathlib.Path(os.environ.get("MCP_KEEP_HOME") or _DEFAULT_HOME)
 CONFIG_PATH      = KEEP_HOME / "config.json"
 INTEGRATIONS_DIR = KEEP_HOME / "integrations"
 REGISTRY_PATH    = KEEP_HOME / "registry.json"
@@ -55,7 +61,7 @@ PACKS_REPO   = "exetorius/mcp-keep-integrations"
 PACKS_BRANCH = "main"
 
 SERVER_NAME = "mcp-keep"
-VERSION     = "1.9.0"
+VERSION     = "1.10.0"
 
 # MCP protocol revision (the spec versions revisions by date, not semver).
 # Pinned to the oldest stable revision for maximum upstream interop; the only
@@ -142,7 +148,7 @@ def load_registry() -> dict:
 # ---------------------------------------------------------------------------
 
 CONFIG_DEFAULTS = {
-    "listen_port":     8089,
+    "listen_port":     8090 if DEV_MODE else 8089,   # dev relay defaults to a non-prod port (#22)
     "max_body_bytes":  4 * 1024 * 1024,   # 4 MB body cap (brick 16)
     "allowed_origins": [],                # browser Origins allowed (brick 14); empty by default
     "capture_interval_seconds": 30,       # fast poll cadence while an upstream is DOWN (re-attach)
@@ -1849,7 +1855,7 @@ def main():
 
     # Report what we loaded from cache (the moat: tools available before any capture)
     total_cached = sum(len(st["manifest"].get("tools", [])) for st in STATE.upstreams.values())
-    log(f"mcp-keep {VERSION} — home {KEEP_HOME}")
+    log(f"mcp-keep {VERSION}{' [DEV]' if DEV_MODE else ''} — home {KEEP_HOME}")
     log(f"{len(STATE.cfg['upstreams'])} upstream(s) configured, {total_cached} tools served from cache")
     log(f"listening on http://127.0.0.1:{port}/mcp")
 
@@ -1901,6 +1907,8 @@ _USAGE = (
     "manage everything through the keep_* tools (keep_status, keep_add_upstream, ...).\n"
     "\n"
     "  --serve        run the relay (used by your client / start-with-OS; not for humans)\n"
+    "  --dev          use an isolated dev home (~/.mcp-keep-dev) + port 8090, so a dev\n"
+    "                 relay never collides with a running prod one (also MCP_KEEP_DEV=1)\n"
     "  --wait-ready   poll an already-running relay until ready (exit 0=up, 1=timeout)\n"
     "  --version, -v  print version and exit\n"
 )

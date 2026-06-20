@@ -28,11 +28,16 @@ python proxy.py --serve
 
 > `--serve` is required to actually run the relay (#56). A bare `python proxy.py` (or any unknown arg) prints a "your MCP client starts me" notice and exits without binding a port — by design, so a stray invocation never spawns a hidden relay.
 
-Use an isolated home while developing so you never touch a real config:
+Use an isolated home while developing so you never touch a real config — and so a
+dev relay can't collide with a running prod one (#22). The easiest way is `--dev`,
+which uses `~/.mcp-keep-dev` and port **8090** instead of `~/.mcp-keep` / `:8089`:
 
 ```bash
-MCP_KEEP_HOME=/tmp/keep-dev python proxy.py --serve
+python proxy.py --serve --dev
 ```
+
+`--dev` is equivalent to `MCP_KEEP_DEV=1`. An explicit `MCP_KEEP_HOME=/path` still
+overrides the home if you want a throwaway dir (e.g. `MCP_KEEP_HOME=/tmp/keep-dev`).
 
 ## Tests
 
