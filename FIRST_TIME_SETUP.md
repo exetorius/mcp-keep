@@ -22,7 +22,7 @@ The **relay is the product**. It runs perfectly well with **zero upstreams** —
 
 In the folder this file came in, find the mcp-keep program:
 
-- A standalone binary: `mcp-keep` (macOS/Linux) or `mcp-keep.exe` (Windows), **or**
+- A standalone binary: `mcp-keep` (macOS/Linux) or `mcp-keep-relay.exe` (Windows — the bundle also has `mcp-keep-watchdog.exe`, the crash-supervisor; launch the relay one), **or**
 - the script `python/proxy.py` (run with `python proxy.py --serve`) if this is a source checkout.
 
 **Launch it detached, and pass `--serve`.** Two things matter here:
@@ -30,7 +30,7 @@ In the folder this file came in, find the mcp-keep program:
 - **`--serve` is required to actually run the relay.** Without it — a bare `mcp-keep` or any unknown argument — the program prints a short "your MCP client starts me, nothing to run here" notice and exits *without binding a port*. This is deliberate: it stops a human who runs the binary by hand from spawning an invisible, windowless relay they can't see or stop. You (the AI) and Start-with-OS both pass `--serve`; you must too.
 - **Detached** matters because mcp-keep is a long-running server: if you start it as an ordinary foreground command, your client may treat it as a *managed background task* and **kill it the moment this session ends** — the relay won't survive a restart. Start it so it's orphaned from your session instead:
 
-- **Windows:** `start "" mcp-keep.exe --serve`  (or PowerShell: `Start-Process .\mcp-keep.exe -ArgumentList '--serve'`)
+- **Windows:** `start "" mcp-keep-relay.exe --serve`  (or PowerShell: `Start-Process .\mcp-keep-relay.exe -ArgumentList '--serve'`)
 - **macOS / Linux binary:** `./mcp-keep --serve &`  (or `nohup ./mcp-keep --serve >/dev/null 2>&1 &`)
 - **Source checkout:** `python proxy.py --serve &`
 
@@ -39,7 +39,7 @@ It will:
 - listen on `http://127.0.0.1:8089/mcp`,
 - run fine with **zero upstreams configured** — that's the expected, correct first-run state. Do not add one to "finish" setup.
 
-> **No window appears — that's intended.** On Windows `mcp-keep.exe` is **windowless**: launching it pops no console, and there is no window to leave open. This is the steady state — mcp-keep is meant to run out of sight and be driven by you (the AI) over MCP. So **don't take the absence of a window as "it didn't start"** — confirm it the right way (below). Its log goes to `~/.mcp-keep/keep.log` instead of a console; `tail` that file to see what it's doing. (macOS/Linux have no console-popup to begin with.)
+> **No window appears — that's intended.** On Windows `mcp-keep-relay.exe` is **windowless**: launching it pops no console, and there is no window to leave open. This is the steady state — mcp-keep is meant to run out of sight and be driven by you (the AI) over MCP. So **don't take the absence of a window as "it didn't start"** — confirm it the right way (below). Its log goes to `~/.mcp-keep/keep.log` instead of a console; `tail` that file to see what it's doing. (macOS/Linux have no console-popup to begin with.)
 
 Confirm it's up — **poll, don't fixed-sleep-then-give-up:**
 

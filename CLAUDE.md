@@ -34,11 +34,13 @@ Start the relay so it outlives this chat (detached, not a foreground/managed tas
 ```bash
 cd "path/to/mcp-keep/python" && python proxy.py --serve &
 # or a built binary, launched detached:
-#   Windows:      start "" mcp-keep.exe --serve
+#   Windows:      start "" mcp-keep-relay.exe --serve
 #   macOS/Linux:  ./mcp-keep --serve &
 ```
 
-The **`--serve` flag is required to actually run the relay** (#56). Without it — a bare `mcp-keep` or any unknown arg — the program prints a "your MCP client starts me, nothing to run here" notice and exits *without binding a port*, so a human who runs it by hand never spawns a stray windowless process. The AI launch and start-with-OS registration both pass `--serve`; you must too.
+On **Windows the bundle ships two binaries** — `mcp-keep-relay.exe` (the relay you launch) and `mcp-keep-watchdog.exe` (the crash-supervisor start-with-OS registers) — so each process shows its role by name in Task Manager. Launch the relay one. macOS/Linux ship a single `mcp-keep` (launchd/systemd supervise — no separate watchdog binary).
+
+The **`--serve` flag is required to actually run the relay** (#56). Without it — a bare `mcp-keep-relay` or any unknown arg — the program prints a "your MCP client starts me, nothing to run here" notice and exits *without binding a port*, so a human who runs it by hand never spawns a stray windowless process. The AI launch and start-with-OS registration both pass `--serve`; you must too.
 
 It creates `~/.mcp-keep/`, listens on `http://127.0.0.1:8089/mcp`, and **runs fine with zero upstreams — that's the correct first-run state. Don't add one to "finish."**
 
@@ -111,7 +113,7 @@ Only after an upstream is attached and working:
 
 Ask if they want mcp-keep to start automatically at login. The easiest path is the `keep_start_with_os` MCP tool (undo with `keep_disable_start_with_os`); the relay's own `/keep-setup` terminal command does the same. Show the user the exact change first — it's a launch-surface effect. The underlying per-OS mechanism (all per-user, **no admin/elevation**):
 
-- **Windows:** HKCU `Run` registry value `mcp-keep` → a `--watchdog` supervisor that launches the relay at login **and restarts it on crash** (#2). (Not Task Scheduler — `schtasks /SC ONLOGON` requires elevation, which defeats enabling it conversationally.)
+- **Windows:** HKCU `Run` registry value `mcp-keep` → `mcp-keep-watchdog.exe --watchdog`, a supervisor that launches `mcp-keep-relay.exe` at login **and restarts it on crash** (#2). (Not Task Scheduler — `schtasks /SC ONLOGON` requires elevation, which defeats enabling it conversationally.)
 - **Mac:** launchd plist at `~/Library/LaunchAgents/com.mcp-keep.plist` (`KeepAlive` → restarts on crash).
 - **Linux:** systemd user service at `~/.config/systemd/user/mcp-keep.service` (`Restart=on-failure`).
 

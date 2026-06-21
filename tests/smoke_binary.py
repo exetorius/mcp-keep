@@ -4,7 +4,7 @@ smoke_binary.py — boot a *packaged* mcp-keep binary and prove it serves.
 
 Run from CI after PyInstaller builds the one-file binary:
 
-    python tests/smoke_binary.py dist/mcp-keep        # or dist/mcp-keep.exe
+    python tests/smoke_binary.py dist/mcp-keep/mcp-keep        # mcp-keep-relay.exe on Windows
 
 Unlike integration_test.py (which runs proxy.py under the interpreter), this
 exercises the frozen artifact end-to-end: it confirms the bundle is complete

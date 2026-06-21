@@ -9,6 +9,8 @@ venv/
 build/
 dist/
 *.spec
+# except our curated Windows two-binary build spec — CI builds from it
+!mcp-keep.spec
 *.exe
 
 # Config (may contain a bearer token) — runtime config lives in ~/.mcp-keep

@@ -35,12 +35,15 @@ jobs:
           - os: ubuntu-latest
             asset: mcp-keep-linux-x86_64
             ext: ""
+            bin: mcp-keep
           - os: macos-latest
             asset: mcp-keep-macos-arm64
             ext: ""
+            bin: mcp-keep
           - os: windows-latest
             asset: mcp-keep-windows-x86_64
             ext: ".exe"
+            bin: mcp-keep-relay   # Windows ships two binaries; the relay is the one to smoke-test
 
     steps:
       - uses: actions/checkout@v6
@@ -56,17 +59,23 @@ jobs:
       - name: Build onedir bundle (windowless on Windows)
         shell: bash
         run: |
-          # Windows exe is --noconsole so no console window ever pops (#8); logs go to
-          # ~/.mcp-keep/keep.log instead. macOS/Linux keep --console; they have no
-          # GUI-subsystem console to suppress (launchd/systemd, no double-click).
+          # Windows builds two windowless binaries (mcp-keep-relay.exe +
+          # mcp-keep-watchdog.exe) from mcp-keep.spec so no console window ever
+          # pops (#8) and each process shows its role by name; logs go to
+          # ~/.mcp-keep/keep.log. macOS/Linux build the single --console binary —
+          # they have no GUI-subsystem console to suppress and no watchdog process
+          # (launchd/systemd supervise), so the CLI build stays.
           if [ "${{ runner.os }}" = "Windows" ]; then
-            pyinstaller --onedir --name mcp-keep --noconsole python/proxy.py
+            pyinstaller mcp-keep.spec
+            # Both named binaries must be present in the shared bundle.
+            test -f "dist/mcp-keep/mcp-keep-relay.exe"
+            test -f "dist/mcp-keep/mcp-keep-watchdog.exe"
           else
             pyinstaller --onedir --name mcp-keep --console python/proxy.py
           fi
 
       - name: Smoke test the built binary
-        run: python tests/smoke_binary.py "dist/mcp-keep/mcp-keep${{ matrix.ext }}"
+        run: python tests/smoke_binary.py "dist/mcp-keep/${{ matrix.bin }}${{ matrix.ext }}"
 
       - name: Bundle docs + zip the onedir folder
         shell: bash

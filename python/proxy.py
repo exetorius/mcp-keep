@@ -1627,6 +1627,7 @@ class QuietServer(ThreadingHTTPServer):
 # ---------------------------------------------------------------------------
 
 _OS = platform.system()
+_EXE_EXT = ".exe" if _OS == "Windows" else ""
 
 def _self_args(flag: str) -> list[str]:
     """Argv that re-invokes this same program with a single mode flag.
@@ -1640,13 +1641,31 @@ def _self_args(flag: str) -> list[str]:
         return [sys.executable, flag]
     return [sys.executable, str(pathlib.Path(__file__).resolve()), flag]
 
+def _sibling_exe(stem: str) -> str | None:
+    """Path to a sibling frozen binary (e.g. 'mcp-keep-relay'), or None.
+
+    The Windows build ships two byte-identical binaries side-by-side in the
+    bundle — mcp-keep-relay.exe (the relay) and mcp-keep-watchdog.exe (the
+    crash-supervisor) — so each process announces its role by name in Task
+    Manager, and the watchdog spawns the relay-named binary so the relay PID
+    reads as mcp-keep-relay.exe. They live in the same dir as whichever one is
+    currently running. Mac/Linux (and any legacy single-exe Windows bundle)
+    have no sibling; return None so callers fall back to sys.executable.
+    """
+    if not getattr(sys, "frozen", False):
+        return None
+    cand = pathlib.Path(sys.executable).resolve().parent / f"{stem}{_EXE_EXT}"
+    return str(cand) if cand.exists() else None
+
 def _launch_args() -> list[str]:
     """Argv that runs the relay itself (--serve)."""
-    return _self_args("--serve")
+    exe = _sibling_exe("mcp-keep-relay")
+    return [exe, "--serve"] if exe else _self_args("--serve")
 
 def _watchdog_args() -> list[str]:
     """Argv that runs the Windows crash-supervisor (--watchdog)."""
-    return _self_args("--watchdog")
+    exe = _sibling_exe("mcp-keep-watchdog")
+    return [exe, "--watchdog"] if exe else _self_args("--watchdog")
 
 def _launch_command() -> str:
     return " ".join(f'"{a}"' for a in _launch_args())

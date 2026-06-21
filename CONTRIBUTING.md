@@ -49,8 +49,12 @@ python tests/integration_test.py
 
 # Optional: build a binary and smoke-test the frozen artifact
 pip install pyinstaller
-pyinstaller --onefile --name mcp-keep --console python/proxy.py
-python tests/smoke_binary.py "dist/mcp-keep"        # dist/mcp-keep.exe on Windows
+# Windows: builds two binaries (mcp-keep-relay.exe + mcp-keep-watchdog.exe) sharing _internal/
+pyinstaller mcp-keep.spec
+python tests/smoke_binary.py "dist/mcp-keep/mcp-keep-relay.exe"
+# macOS/Linux: single console binary
+pyinstaller --onedir --name mcp-keep --console python/proxy.py
+python tests/smoke_binary.py "dist/mcp-keep/mcp-keep"
 ```
 
 CI runs `py_compile` + `integration_test.py` on Windows, macOS, and Linux for every push/PR to `main` and `contrib`. The release workflow additionally builds and smoke-tests the binaries.
