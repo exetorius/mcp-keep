@@ -31,6 +31,7 @@ import pathlib
 import platform
 import queue
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -61,7 +62,7 @@ PACKS_REPO   = "exetorius/mcp-keep-integrations"
 PACKS_BRANCH = "main"
 
 SERVER_NAME = "mcp-keep"
-VERSION     = "1.10.0"
+VERSION     = "1.11.0"
 
 # MCP protocol revision (the spec versions revisions by date, not semver).
 # Pinned to the oldest stable revision for maximum upstream interop; the only
@@ -999,8 +1000,9 @@ def management_tools(state: "State") -> list[dict]:
         "name": "keep_start_with_os",
         "description": ("Register mcp-keep to start automatically at login, so the relay is "
                         "already up before any client session begins (the only zero-reload path). "
-                        "This changes the OS launch surface — a scheduled task (Windows), launchd "
-                        "agent (macOS), or systemd user service (Linux). Show the user the exact "
+                        "This changes the OS launch surface — an HKCU Run-key watchdog that also "
+                        "restarts the relay on crash (Windows), a launchd KeepAlive agent (macOS), "
+                        "or a systemd Restart=on-failure user service (Linux). Show the user the exact "
                         "change and get explicit consent BEFORE calling. Idempotent."),
         "inputSchema": {"type": "object", "properties": {}, "required": []},
     })
@@ -1626,8 +1628,8 @@ class QuietServer(ThreadingHTTPServer):
 
 _OS = platform.system()
 
-def _launch_args() -> list[str]:
-    """Argv that re-launches keep at login.
+def _self_args(flag: str) -> list[str]:
+    """Argv that re-invokes this same program with a single mode flag.
 
     When packaged by PyInstaller, the binary *is* the program: sys.executable
     points at the frozen exe and there is no script path to pass (sys.argv[0]
@@ -1635,11 +1637,22 @@ def _launch_args() -> list[str]:
     interpreter against proxy.py.
     """
     if getattr(sys, "frozen", False):
-        return [sys.executable, "--serve"]
-    return [sys.executable, str(pathlib.Path(__file__).resolve()), "--serve"]
+        return [sys.executable, flag]
+    return [sys.executable, str(pathlib.Path(__file__).resolve()), flag]
+
+def _launch_args() -> list[str]:
+    """Argv that runs the relay itself (--serve)."""
+    return _self_args("--serve")
+
+def _watchdog_args() -> list[str]:
+    """Argv that runs the Windows crash-supervisor (--watchdog)."""
+    return _self_args("--watchdog")
 
 def _launch_command() -> str:
     return " ".join(f'"{a}"' for a in _launch_args())
+
+def _watchdog_command() -> str:
+    return " ".join(f'"{a}"' for a in _watchdog_args())
 
 # Per-user autostart on Windows. We use the HKCU Run key rather than Task
 # Scheduler: schtasks /SC ONLOGON requires an elevated (admin) session, which
@@ -1657,9 +1670,14 @@ def register_startup() -> tuple[bool, str]:
         try:
             with winreg.OpenKey(winreg.HKEY_CURRENT_USER, _WIN_RUN_KEY, 0,
                                 winreg.KEY_SET_VALUE) as k:
+                # Launch the watchdog, not --serve directly: the Run key only fires
+                # once at login and can't restart a crashed relay the way launchd
+                # KeepAlive / systemd Restart=on-failure do (#2). The watchdog keeps
+                # exactly one relay alive across crashes.
                 winreg.SetValueEx(k, _WIN_RUN_VALUE, 0, winreg.REG_SZ,
-                                  _launch_command())
-            return True, "Registered in the HKCU Run key — keep starts at login (per-user, no admin)."
+                                  _watchdog_command())
+            return True, ("Registered in the HKCU Run key — keep starts at login and a "
+                          "watchdog restarts it on crash (per-user, no admin).")
         except OSError as e:
             return False, f"Registry write failed: {e}"
     elif _OS == "Darwin":
@@ -1706,8 +1724,15 @@ def unregister_startup() -> tuple[bool, str]:
             with winreg.OpenKey(winreg.HKEY_CURRENT_USER, _WIN_RUN_KEY, 0,
                                 winreg.KEY_SET_VALUE) as k:
                 winreg.DeleteValue(k, _WIN_RUN_VALUE)
-            return True, "Removed from the HKCU Run key."
+            # Disable means stopped now, not next logout: a watchdog from an
+            # earlier login would otherwise keep respawning the relay. Stop it,
+            # but leave the current relay running this session (#2).
+            stopped = _stop_watchdog()
+            return True, ("Removed from the HKCU Run key" +
+                          (" and stopped the running watchdog." if stopped
+                           else " (no watchdog was running)."))
         except FileNotFoundError:
+            _stop_watchdog()
             return True, "Was not in the HKCU Run key — nothing to remove."
         except OSError as e:
             return False, f"Registry delete failed: {e}"
@@ -1815,6 +1840,14 @@ def command_loop():
 # Entry point
 # ---------------------------------------------------------------------------
 
+def _probe_health(port: int) -> bool:
+    """One-shot: is a relay answering the health banner on this port right now?"""
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/mcp", timeout=2) as resp:
+            return resp.status == 200 and b"mcp-keep running" in resp.read()
+    except (urllib.error.URLError, ConnectionError, OSError):
+        return False  # not bound yet, or gone
+
 def wait_ready(timeout: float = 20.0, interval: float = 0.4) -> bool:
     """Poll the local health endpoint until the relay answers, or timeout.
 
@@ -1826,18 +1859,92 @@ def wait_ready(timeout: float = 20.0, interval: float = 0.4) -> bool:
     HTTP, not stdout, so it still works when the relay runs windowless (#8).
     """
     port = int(load_config()["listen_port"])
-    url = f"http://127.0.0.1:{port}/mcp"
     deadline = time.monotonic() + timeout
     while True:
-        try:
-            with urllib.request.urlopen(url, timeout=2) as resp:
-                if resp.status == 200 and b"mcp-keep running" in resp.read():
-                    return True
-        except (urllib.error.URLError, ConnectionError, OSError):
-            pass  # not bound yet — a slow first start is expected, keep polling
+        if _probe_health(port):
+            return True
         if time.monotonic() >= deadline:
             return False
         time.sleep(interval)
+
+# ---------------------------------------------------------------------------
+# Windows crash-supervisor (#2)
+# ---------------------------------------------------------------------------
+# Mac (launchd KeepAlive) and Linux (systemd Restart=on-failure) restart a
+# crashed relay natively; the Windows HKCU Run key only fires once at login.
+# So on Windows start-with-OS points the Run key at this watchdog instead of
+# --serve. It keeps exactly one relay alive and honours the no-second-relay
+# rule: it never spawns while the port is already served.
+
+_WATCHDOG_PIDFILE = KEEP_HOME / "watchdog.pid"
+_WATCHDOG_BACKOFF_MAX = 30.0
+_WATCHDOG_HEALTHY_UPTIME = 60.0  # a relay that ran this long counts as a fresh crash
+
+def watchdog():
+    """Supervise the relay: (re)spawn --serve and restart it on unexpected exit.
+
+    Backoff is capped so a hard crash-loop can't hammer CPU or fill keep.log.
+    If something else already owns the port (e.g. the AI launched the relay
+    mid-session), the watchdog idles and monitors rather than double-binding.
+    """
+    KEEP_HOME.mkdir(parents=True, exist_ok=True)
+    init_log()
+    port = int(load_config()["listen_port"])
+    _WATCHDOG_PIDFILE.write_text(str(os.getpid()), encoding="utf-8")
+    log(f"mcp-keep watchdog {VERSION} — supervising relay on :{port} (pid {os.getpid()})")
+    # Windowless child, no inherited console (the watchdog itself is windowless).
+    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if _OS == "Windows" else 0
+    backoff = 1.0
+    try:
+        while True:
+            if _probe_health(port):
+                # Another relay owns the port — don't spawn a second one.
+                time.sleep(5.0)
+                backoff = 1.0
+                continue
+            start = time.monotonic()
+            # Detach the child's stdio: a supervised relay has no human attached
+            # even if the watchdog inherited a console (e.g. launched from a
+            # terminal), so it must never be treated as interactive — otherwise
+            # _interactive_console() is true and the relay blocks in the setup
+            # menu before it ever binds. It logs to keep.log regardless.
+            proc = subprocess.Popen(_launch_args(), creationflags=flags,
+                                    stdin=subprocess.DEVNULL,
+                                    stdout=subprocess.DEVNULL,
+                                    stderr=subprocess.DEVNULL)
+            log(f"watchdog: started relay pid {proc.pid}")
+            proc.wait()
+            uptime = time.monotonic() - start
+            if uptime >= _WATCHDOG_HEALTHY_UPTIME:
+                backoff = 1.0  # it was healthy a while; treat this as a fresh crash
+            log(f"watchdog: relay pid {proc.pid} exited rc={proc.returncode} "
+                f"after {uptime:.0f}s — restarting in {backoff:.0f}s")
+            time.sleep(backoff)
+            backoff = min(backoff * 2, _WATCHDOG_BACKOFF_MAX)
+    finally:
+        try:
+            if _WATCHDOG_PIDFILE.read_text().strip() == str(os.getpid()):
+                _WATCHDOG_PIDFILE.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+def _stop_watchdog() -> bool:
+    """Terminate a running watchdog (only the supervisor, not its relay child).
+
+    Killing just the watchdog leaves the current relay running this session but
+    unsupervised — so 'disable start-with-OS' stops respawning now without
+    yanking the relay out from under an active client.
+    """
+    try:
+        pid = int(_WATCHDOG_PIDFILE.read_text().strip())
+    except (OSError, ValueError):
+        return False
+    try:
+        os.kill(pid, signal.SIGTERM)  # TerminateProcess on Windows (single pid)
+    except (OSError, ProcessLookupError):
+        pass
+    _WATCHDOG_PIDFILE.unlink(missing_ok=True)
+    return True
 
 def main():
     global STATE
@@ -1907,6 +2014,7 @@ _USAGE = (
     "manage everything through the keep_* tools (keep_status, keep_add_upstream, ...).\n"
     "\n"
     "  --serve        run the relay (used by your client / start-with-OS; not for humans)\n"
+    "  --watchdog     Windows crash-supervisor (registered by start-with-OS; not for humans)\n"
     "  --dev          use an isolated dev home (~/.mcp-keep-dev) + port 8090, so a dev\n"
     "                 relay never collides with a running prod one (also MCP_KEEP_DEV=1)\n"
     "  --wait-ready   poll an already-running relay until ready (exit 0=up, 1=timeout)\n"
@@ -1921,6 +2029,11 @@ if __name__ == "__main__":
         sys.exit(0 if wait_ready() else 1)
     if "--version" in _args or "-v" in _args:
         print(f"mcp-keep {VERSION}")
+        sys.exit(0)
+    if "--watchdog" in _args:
+        # Windows crash-supervisor (#2): keeps one relay alive across crashes.
+        # Registered into the HKCU Run key by start-with-OS, not run by humans.
+        watchdog()
         sys.exit(0)
     if "--serve" in _args:
         # The only path that binds a port. Used by the MCP client launch and by
